@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash icon/background only apply on API 31+ (see values-v31); below that this is
+         just Theme.TMessages and the system shows no splash ceremony at all. -->
+    <style name="Theme.SteamChatDebug" parent="Theme.TMessages" />
+</resources>

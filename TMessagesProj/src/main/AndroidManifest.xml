@@ -210,7 +210,9 @@
         <activity
             android:name="org.steamchat.ui.SteamDebugActivity"
             android:label="SteamChat Debug"
-            android:theme="@style/Theme.TMessages"
+            android:icon="@mipmap/ic_launcher_steamchat"
+            android:roundIcon="@mipmap/ic_launcher_steamchat_round"
+            android:theme="@style/Theme.SteamChatDebug"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
