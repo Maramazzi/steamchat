@@ -1,12 +1,13 @@
 package org.steamchat.ui
 
-import org.steamchat.service.FakeSteamService
 import org.steamchat.service.SteamService
+import org.steamchat.steamkit.JavaSteamService
 
 /**
- * Stage 2 wiring only: a single shared fake backend so the dialogs list and chat screen see the
- * same data. Replaced by real DI (Hilt/Koin/manual) once the real SteamKit-backed service lands.
+ * Single shared backend instance so the login/dialogs/chat screens all see the same session.
+ * Replaced by real DI (Hilt/Koin/manual) later. Swap to org.steamchat.service.FakeSteamService()
+ * for offline UI iteration without a real Steam account.
  */
 object SteamServiceHolder {
-    val service: SteamService = FakeSteamService()
+    val service: SteamService = JavaSteamService()
 }

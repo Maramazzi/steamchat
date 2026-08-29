@@ -19,7 +19,7 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
         actionBarLayout = ActionBarLayout(this, true)
         actionBarLayout.setDelegate(this)
         setContentView(actionBarLayout)
-        actionBarLayout.addFragmentToStack(SteamDialogsFragment())
+        actionBarLayout.addFragmentToStack(SteamLoginFragment())
         actionBarLayout.showLastFragment()
     }
 }

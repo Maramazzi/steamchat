@@ -84,6 +84,7 @@ dependencies {
     }
     api project(':jlatexmath')
     implementation project(':steamchat-domain')
+    implementation project(':steamchat-steamkit')
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0"
 
 //    implementation 'com.google.mlkit:translate:17.0.3'

@@ -12,7 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.steamchat.domain.SteamDialog
-import org.steamchat.service.SteamGuardHandler
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.R
 import org.telegram.ui.ActionBar.ActionBar
@@ -21,8 +20,9 @@ import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.LayoutHelper
 
 /**
- * Stage 2 proof: real Telegram UI chrome (BaseFragment/ActionBar/Theme) driven entirely by
- * SteamService/FakeSteamService - no org.telegram.messenger.MessagesController involved.
+ * Real Telegram UI chrome (BaseFragment/ActionBar/Theme) driven entirely by SteamService - no
+ * org.telegram.messenger.MessagesController involved. Assumes login already happened (see
+ * SteamLoginFragment, which pushes this fragment on SteamLoginResult.Success).
  */
 class SteamDialogsFragment : BaseFragment() {
 
@@ -33,7 +33,7 @@ class SteamDialogsFragment : BaseFragment() {
 
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(R.drawable.ic_ab_back)
-        actionBar.setTitle("SteamChat (fake)")
+        actionBar.setTitle("SteamChat")
         actionBar.setAllowOverlayTitle(true)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
@@ -52,7 +52,6 @@ class SteamDialogsFragment : BaseFragment() {
         fragmentView = root
 
         scope.launch {
-            service.login("fake", "fake", NoOpGuardHandler)
             service.observeDialogs().collect { list ->
                 dialogs = list
                 adapter.notifyDataSetChanged()
@@ -91,10 +90,4 @@ class SteamDialogsFragment : BaseFragment() {
     }
 
     private class DialogViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
-
-    private object NoOpGuardHandler : SteamGuardHandler {
-        override suspend fun provideDeviceCode(previousWasIncorrect: Boolean) = ""
-        override suspend fun provideEmailCode(email: String?, previousWasIncorrect: Boolean) = ""
-        override suspend fun confirmViaMobileApp() = true
-    }
 }
