@@ -208,6 +208,17 @@
         </activity-alias>
 
         <activity
+            android:name="org.steamchat.ui.SteamDebugActivity"
+            android:label="SteamChat Debug"
+            android:theme="@style/Theme.TMessages"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name="org.telegram.ui.LaunchActivity"
             android:theme="@style/Theme.TMessages.Start"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode|smallestScreenSize|screenLayout"
