@@ -40,6 +40,11 @@ class SteamDialogCell(context: Context) : FrameLayout(context) {
     init {
         val avatarSize = 52f
 
+        // Ripple fires on ACTION_DOWN, not on release - press feedback should be instant (Apple
+        // Fluid Interfaces §1: respond on pointer-down). Same helper real Telegram cells use.
+        isClickable = true
+        background = Theme.getSelectorDrawable(true)
+
         avatarImageView.setRoundRadius(dp(avatarSize / 2))
         addView(avatarImageView, LayoutHelper.createFrame(avatarSize.toInt(), avatarSize, Gravity.START or Gravity.CENTER_VERTICAL, 12f, 0f, 0f, 0f))
 

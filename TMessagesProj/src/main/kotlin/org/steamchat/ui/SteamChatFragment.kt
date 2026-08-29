@@ -55,7 +55,10 @@ class SteamChatFragment(
 
         val sendButton = TextView(context)
         sendButton.text = "Send"
+        sendButton.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
         sendButton.setPadding(dp(16f), dp(12f), dp(16f), dp(12f))
+        sendButton.isClickable = true
+        sendButton.background = Theme.getSelectorDrawable(true)
         sendButton.setOnClickListener {
             val text = input.text.toString().trim()
             if (text.isNotEmpty()) {
