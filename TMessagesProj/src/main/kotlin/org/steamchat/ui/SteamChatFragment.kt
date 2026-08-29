@@ -100,16 +100,13 @@ class SteamChatFragment(
     private inner class MessagesAdapter : RecyclerView.Adapter<MessageViewHolder>() {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MessageViewHolder {
-            val textView = TextView(parent.context)
-            textView.setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
-            textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
-            return MessageViewHolder(textView)
+            val cell = SteamMessageCell(parent.context)
+            cell.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            return MessageViewHolder(cell)
         }
 
         override fun onBindViewHolder(holder: MessageViewHolder, position: Int) {
-            val message = messages[position]
-            val prefix = if (message.isOutgoing) "> " else "< "
-            (holder.itemView as TextView).text = prefix + message.text
+            (holder.itemView as SteamMessageCell).setMessage(messages[position])
         }
 
         override fun getItemCount(): Int = messages.size

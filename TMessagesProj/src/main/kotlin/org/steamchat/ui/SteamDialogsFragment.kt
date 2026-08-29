@@ -4,7 +4,6 @@ import android.content.Context
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.TextView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.CoroutineScope
@@ -69,18 +68,14 @@ class SteamDialogsFragment : BaseFragment() {
     private inner class DialogsAdapter : RecyclerView.Adapter<DialogViewHolder>() {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): DialogViewHolder {
-            val textView = TextView(parent.context)
-            textView.setPadding(dp(16f), dp(12f), dp(16f), dp(12f))
-            textView.textSize = 16f
-            textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
-            return DialogViewHolder(textView)
+            val cell = SteamDialogCell(parent.context)
+            cell.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72f))
+            return DialogViewHolder(cell)
         }
 
         override fun onBindViewHolder(holder: DialogViewHolder, position: Int) {
             val dialog = dialogs[position]
-            val unread = if (dialog.unreadCount > 0) "  [${dialog.unreadCount}]" else ""
-            (holder.itemView as TextView).text =
-                "${dialog.friend.personaName}$unread\n${dialog.lastMessage?.text.orEmpty()}"
+            (holder.itemView as SteamDialogCell).setDialog(dialog)
             holder.itemView.setOnClickListener {
                 presentFragment(SteamChatFragment(dialog.friend.steamId64, dialog.friend.personaName))
             }
