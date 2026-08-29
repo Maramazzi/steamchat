@@ -28,6 +28,12 @@ android {
 
     sourceSets.main.jniLibs.srcDirs = ['../TMessagesProj/jni/']
 
+    packagingOptions {
+        // okhttp-coroutines, jspecify, and bcprov-jdk18on (needed by steamchat-steamkit/JavaSteam)
+        // all ship an identical multi-release-jar manifest at this path.
+        exclude 'META-INF/versions/9/OSGI-INF/MANIFEST.MF'
+    }
+
     lintOptions {
         disable 'MissingTranslation'
         disable 'ExtraTranslation'

@@ -16,7 +16,10 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        actionBarLayout = ActionBarLayout(this, true)
+        // main=false: skips ActionBarLayout's BottomSheetTabs setup, which hard-depends on the
+        // static LaunchActivity.instance singleton that we never create (see setFragmentStack).
+        actionBarLayout = ActionBarLayout(this, false)
+        actionBarLayout.setFragmentStack(ArrayList())
         actionBarLayout.setDelegate(this)
         setContentView(actionBarLayout)
         actionBarLayout.addFragmentToStack(SteamLoginFragment())

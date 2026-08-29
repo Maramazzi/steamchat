@@ -21,7 +21,8 @@ TMessagesProj_AppStandalone/afat/
 TMessagesProj_AppHuawei/afat/
 TMessagesProj/jni/ffmpeg/build_android
 
-# Spike screenshots (throwaway debug artifacts)
+# Debug screenshots (throwaway debug artifacts)
+/screenshot*.png
 spike/screenshot*.png
 spike/fresh*.png
 spike/top.png
