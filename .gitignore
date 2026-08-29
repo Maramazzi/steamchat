@@ -27,3 +27,6 @@ spike/fresh*.png
 spike/top.png
 spike/check.png
 spike/success.png
+
+# Claude Code session artifacts
+.claude/
