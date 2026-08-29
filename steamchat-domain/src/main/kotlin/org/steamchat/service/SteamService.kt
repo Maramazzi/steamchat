@@ -17,6 +17,9 @@ interface SteamService {
 
     suspend fun login(username: String, password: String, guardHandler: SteamGuardHandler): SteamLoginResult
 
+    /** Tries to resume a previously saved session (see [SessionStore]) with no user interaction. */
+    suspend fun resumeSession(): SteamLoginResult
+
     suspend fun logout()
 
     fun observeCurrentUser(): StateFlow<SteamUser?>

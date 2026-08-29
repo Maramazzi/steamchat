@@ -1,7 +1,9 @@
 package org.steamchat.ui
 
+import org.telegram.messenger.ApplicationLoader
 import org.steamchat.service.SteamService
 import org.steamchat.steamkit.JavaSteamService
+import org.steamchat.storage.EncryptedSessionStore
 
 /**
  * Single shared backend instance so the login/dialogs/chat screens all see the same session.
@@ -9,5 +11,7 @@ import org.steamchat.steamkit.JavaSteamService
  * for offline UI iteration without a real Steam account.
  */
 object SteamServiceHolder {
-    val service: SteamService = JavaSteamService()
+    val service: SteamService by lazy {
+        JavaSteamService(EncryptedSessionStore(ApplicationLoader.applicationContext))
+    }
 }

@@ -70,7 +70,22 @@ class SteamLoginFragment : BaseFragment() {
         root.addView(statusText, LinearLayout.LayoutParams(fieldParams))
 
         fragmentView = root
+        tryResumeSession()
         return root
+    }
+
+    private fun tryResumeSession() {
+        loginButton.isEnabled = false
+        statusText.text = "Восстановление сессии..."
+        scope.launch {
+            when (val result = service.resumeSession()) {
+                is SteamLoginResult.Success -> presentFragment(SteamDialogsFragment(), true)
+                is SteamLoginResult.Failure -> {
+                    statusText.text = ""
+                    loginButton.isEnabled = true
+                }
+            }
+        }
     }
 
     private fun onLoginClicked() {

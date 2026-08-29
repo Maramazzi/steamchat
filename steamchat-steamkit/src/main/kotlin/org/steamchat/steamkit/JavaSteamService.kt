@@ -33,10 +33,12 @@ import org.steamchat.domain.SteamDialog
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamStatus
 import org.steamchat.domain.SteamUser
+import org.steamchat.service.SessionStore
 import org.steamchat.service.SteamConnectionState
 import org.steamchat.service.SteamGuardHandler
 import org.steamchat.service.SteamLoginResult
 import org.steamchat.service.SteamService
+import org.steamchat.service.StoredSteamSession
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -46,7 +48,7 @@ import java.util.concurrent.atomic.AtomicLong
  * [SteamService] contract instead of ad-hoc sample code. No SteamKit2/JavaSteam type is exposed
  * outside this class (section 7 of the master prompt).
  */
-class JavaSteamService : SteamService {
+class JavaSteamService(private val sessionStore: SessionStore) : SteamService {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -120,6 +122,7 @@ class JavaSteamService : SteamService {
                     details.accessToken = pollResponse.refreshToken
                     details.loginID = 149
                     cachedLogOnDetails = details
+                    sessionStore.save(StoredSteamSession(pollResponse.accountName, pollResponse.refreshToken))
                     user.logOn(details)
                 } catch (e: Exception) {
                     if (!loginResult.isCompleted) loginResult.complete(SteamLoginResult.Failure(e.message ?: e.toString()))
@@ -142,6 +145,10 @@ class JavaSteamService : SteamService {
         subscriptions += manager.subscribe(LoggedOnCallback::class.java) { cb ->
             if (cb.result != EResult.OK) {
                 _connectionState.value = SteamConnectionState.DISCONNECTED
+                // Whatever details we tried (fresh or resumed) were rejected - don't keep retrying
+                // a dead session on the next app launch.
+                cachedLogOnDetails = null
+                sessionStore.clear()
                 if (!loginResult.isCompleted) loginResult.complete(SteamLoginResult.Failure(cb.result.toString()))
             } else {
                 _connectionState.value = SteamConnectionState.CONNECTED
@@ -215,7 +222,21 @@ class JavaSteamService : SteamService {
         return loginResult.await()
     }
 
+    override suspend fun resumeSession(): SteamLoginResult {
+        val stored = sessionStore.load() ?: return SteamLoginResult.Failure("no stored session")
+        val details = LogOnDetails()
+        details.username = stored.username
+        details.accessToken = stored.refreshToken
+        details.loginID = 149
+        cachedLogOnDetails = details
+        // password/guardHandler are unused here: cachedLogOnDetails being pre-set makes
+        // ConnectedCallback take the resume branch instead of the credential-auth branch.
+        return login(stored.username, "", NoOpSteamGuardHandler)
+    }
+
     override suspend fun logout() {
+        cachedLogOnDetails = null
+        sessionStore.clear()
         steamUserHandler?.logOff()
     }
 
@@ -269,5 +290,11 @@ class JavaSteamService : SteamService {
                 unreadCount = unreadCounts[friend.steamId64] ?: 0,
             )
         }.sortedByDescending { it.lastMessage?.timestamp ?: 0L }
+    }
+
+    private object NoOpSteamGuardHandler : SteamGuardHandler {
+        override suspend fun provideDeviceCode(previousWasIncorrect: Boolean) = ""
+        override suspend fun provideEmailCode(email: String?, previousWasIncorrect: Boolean) = ""
+        override suspend fun confirmViaMobileApp() = true
     }
 }

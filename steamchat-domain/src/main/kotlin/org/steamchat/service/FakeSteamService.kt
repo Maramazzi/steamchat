@@ -78,6 +78,12 @@ class FakeSteamService : SteamService {
         return SteamLoginResult.Success
     }
 
+    override suspend fun resumeSession(): SteamLoginResult = login("fake", "fake", object : SteamGuardHandler {
+        override suspend fun provideDeviceCode(previousWasIncorrect: Boolean) = ""
+        override suspend fun provideEmailCode(email: String?, previousWasIncorrect: Boolean) = ""
+        override suspend fun confirmViaMobileApp() = true
+    })
+
     override suspend fun logout() {
         connectionStateFlow.value = SteamConnectionState.DISCONNECTED
         currentUserFlow.value = null
