@@ -1,0 +1,37 @@
+// Pure Kotlin/JVM module: Steam domain models + SteamService abstraction + fake backend.
+// Deliberately has zero Android dependency and zero dependency on org.telegram.* code, so it
+// builds/tests in isolation. The future real (JavaSteam-backed) implementation needs Java 17 +
+// core library desugaring (see /spike) which TMessagesProj (Java 8, minSdk 21) does not use -
+// keeping this split avoids forcing that bump onto the existing Telegram build.
+apply plugin: 'org.jetbrains.kotlin.jvm'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0"
+
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+sourceCompatibility = JavaVersion.VERSION_17
+targetCompatibility = JavaVersion.VERSION_17
+
+compileKotlin {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+compileTestKotlin {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
