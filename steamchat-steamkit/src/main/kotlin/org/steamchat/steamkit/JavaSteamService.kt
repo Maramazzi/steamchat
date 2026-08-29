@@ -6,6 +6,7 @@ import `in`.dragonbra.javasteam.enums.EResult
 import `in`.dragonbra.javasteam.steam.authentication.AuthSessionDetails
 import `in`.dragonbra.javasteam.steam.handlers.steamfriends.SteamFriends
 import `in`.dragonbra.javasteam.steam.handlers.steamfriends.callback.FriendMsgCallback
+import `in`.dragonbra.javasteam.steam.handlers.steamfriends.callback.FriendMsgHistoryCallback
 import `in`.dragonbra.javasteam.steam.handlers.steamfriends.callback.FriendsListCallback
 import `in`.dragonbra.javasteam.steam.handlers.steamfriends.callback.PersonaStateCallback
 import `in`.dragonbra.javasteam.steam.handlers.steamuser.LogOnDetails
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.future.await
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.steamchat.domain.SteamDialog
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamStatus
@@ -71,6 +73,10 @@ class JavaSteamService(private val sessionStore: SessionStore) : SteamService {
     private val messagesByFriend = ConcurrentHashMap<Long, MutableList<SteamMessage>>()
     private val unreadCounts = ConcurrentHashMap<Long, Int>()
     private val nextMessageId = AtomicLong(1)
+
+    /** Steam keeps recent friend-message history server-side; fetched once per friend, on demand. */
+    private val historyLoaded = ConcurrentHashMap.newKeySet<Long>()
+    private val pendingHistoryRequests = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
 
     private val _connectionState = MutableStateFlow(SteamConnectionState.DISCONNECTED)
     private val _currentUser = MutableStateFlow<SteamUser?>(null)
@@ -190,6 +196,31 @@ class JavaSteamService(private val sessionStore: SessionStore) : SteamService {
             // Names/avatars/status arrive per-friend via PersonaStateCallback, nothing to do here.
         }
 
+        subscriptions += manager.subscribe(FriendMsgHistoryCallback::class.java) { cb ->
+            val friendId = cb.steamID.convertToUInt64()
+            if (cb.result == EResult.OK) {
+                val myId = _currentUser.value?.steamId64 ?: 0L
+                val historyMessages = cb.messages.map { historyEntry ->
+                    val senderId = historyEntry.steamID.convertToUInt64()
+                    SteamMessage(
+                        id = nextMessageId.getAndIncrement(),
+                        chatPartnerSteamId64 = friendId,
+                        senderSteamId64 = senderId,
+                        text = historyEntry.message,
+                        timestamp = historyEntry.timestamp.time,
+                        isOutgoing = senderId == myId,
+                    )
+                }
+                val merged = (historyMessages + messagesByFriend[friendId].orEmpty())
+                    .distinctBy { Triple(it.senderSteamId64, it.timestamp, it.text) }
+                    .sortedBy { it.timestamp }
+                    .toMutableList()
+                messagesByFriend[friendId] = merged
+                rebuildDialogs()
+            }
+            pendingHistoryRequests.remove(friendId)?.complete(Unit)
+        }
+
         subscriptions += manager.subscribe(FriendMsgCallback::class.java) { cb ->
             val text = cb.message
             if (cb.entryType == EChatEntryType.ChatMsg && text != null) {
@@ -247,12 +278,25 @@ class JavaSteamService(private val sessionStore: SessionStore) : SteamService {
     override fun observeFriends(): StateFlow<List<SteamUser>> = _friends
 
     /**
-     * In-memory, this-session-only history. Steam's classic FriendMsgCallback has no persisted
-     * history API wired up yet (that's requestMessageHistory - a follow-up, see section 17/21 of
-     * the master prompt: offline cache is explicitly MVP-2, not MVP-1).
+     * First call per friend triggers a requestMessageHistory() round trip to Steam's servers and
+     * waits (up to 5s) for the FriendMsgHistoryCallback response, so history survives session
+     * restarts even though messagesByFriend itself is in-memory only. Later calls just return the
+     * cache - no persisted local disk store yet (that's still section 17/21 MVP-2: offline access
+     * with zero network at all).
      */
-    override suspend fun getMessageHistory(friendSteamId64: Long): List<SteamMessage> =
-        messagesByFriend[friendSteamId64].orEmpty()
+    override suspend fun getMessageHistory(friendSteamId64: Long): List<SteamMessage> {
+        if (historyLoaded.add(friendSteamId64)) {
+            val friends = steamFriendsHandler
+            if (friends != null) {
+                val deferred = CompletableDeferred<Unit>()
+                pendingHistoryRequests[friendSteamId64] = deferred
+                friends.requestMessageHistory(SteamID(friendSteamId64))
+                withTimeoutOrNull(5000L) { deferred.await() }
+                pendingHistoryRequests.remove(friendSteamId64)
+            }
+        }
+        return messagesByFriend[friendSteamId64].orEmpty()
+    }
 
     override fun observeMessages(friendSteamId64: Long): Flow<SteamMessage> =
         incomingMessages.filter { it.chatPartnerSteamId64 == friendSteamId64 }

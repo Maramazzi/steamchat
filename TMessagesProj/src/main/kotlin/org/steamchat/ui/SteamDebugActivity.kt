@@ -25,4 +25,16 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
         actionBarLayout.addFragmentToStack(SteamLoginFragment())
         actionBarLayout.showLastFragment()
     }
+
+    // Without this, closing the only remaining fragment (e.g. SteamDialogsFragment after
+    // SteamLoginFragment was removed via removeLast=true on login) leaves ActionBarLayout with an
+    // empty fragment stack and nothing to draw - a blank white screen with no way back. Finish the
+    // Activity ourselves instead and block ActionBarLayout's own pop-to-empty.
+    override fun needCloseLastFragment(layout: INavigationLayout): Boolean {
+        if (layout.fragmentStack.size <= 1) {
+            finish()
+            return false
+        }
+        return true
+    }
 }
