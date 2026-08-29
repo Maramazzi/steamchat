@@ -1,0 +1,18 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+*.apk
+local.properties
+.cxx/
+captures/
+
+# IDE
+.idea/
+*.iml
+
+# Spike screenshots (throwaway debug artifacts)
+spike/screenshot*.png
+spike/fresh*.png
+spike/top.png
+spike/check.png
+spike/success.png
