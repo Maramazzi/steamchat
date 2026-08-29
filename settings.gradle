@@ -8,3 +8,4 @@ include ':jlatexmath'
 project(':jlatexmath').projectDir = file('TMessagesProj/lib/jlatexmath/jlatexmath')
 
 include ':steamchat-domain'
+include ':steamchat-steamkit'
