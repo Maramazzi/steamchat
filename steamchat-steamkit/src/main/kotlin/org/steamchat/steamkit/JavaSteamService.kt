@@ -56,6 +56,15 @@ class JavaSteamService : SteamService {
     private var isRunning = false
     private val subscriptions = mutableListOf<AutoCloseable>()
 
+    /**
+     * Set once the credential+Guard auth flow succeeds. Steam's CM servers reconnect fairly
+     * routinely (load balancing, migrations) - without this, every reconnect re-ran the full
+     * credential auth flow from scratch, which meant a brand new Guard confirmation prompt on the
+     * user's phone each time. Real Steam clients resume with the existing session instead.
+     */
+    private var cachedLogOnDetails: LogOnDetails? = null
+    private var pendingLogin: CompletableDeferred<SteamLoginResult>? = null
+
     private val friendsById = ConcurrentHashMap<Long, SteamUser>()
     private val messagesByFriend = ConcurrentHashMap<Long, MutableList<SteamMessage>>()
     private val unreadCounts = ConcurrentHashMap<Long, Int>()
@@ -70,6 +79,9 @@ class JavaSteamService : SteamService {
     override val connectionState: StateFlow<SteamConnectionState> get() = _connectionState
 
     override suspend fun login(username: String, password: String, guardHandler: SteamGuardHandler): SteamLoginResult {
+        pendingLogin?.let { existing -> if (!existing.isCompleted) return existing.await() }
+        if (_connectionState.value == SteamConnectionState.CONNECTED) return SteamLoginResult.Success
+
         val client = SteamClient()
         val manager = CallbackManager(client)
         val user = client.getHandler(JavaSteamUserHandler::class.java)!!
@@ -79,8 +91,16 @@ class JavaSteamService : SteamService {
 
         val authenticator = GuardHandlerAuthenticator(serviceScope, guardHandler)
         val loginResult = CompletableDeferred<SteamLoginResult>()
+        pendingLogin = loginResult
 
         subscriptions += manager.subscribe(ConnectedCallback::class.java) {
+            val cached = cachedLogOnDetails
+            if (cached != null) {
+                // Reconnect after an already-successful login: resume with the same session
+                // instead of running a brand new credential+Guard flow (see cachedLogOnDetails doc).
+                user.logOn(cached)
+                return@subscribe
+            }
             serviceScope.launch {
                 try {
                     val authDetails = AuthSessionDetails()
@@ -99,9 +119,10 @@ class JavaSteamService : SteamService {
                     details.username = pollResponse.accountName
                     details.accessToken = pollResponse.refreshToken
                     details.loginID = 149
+                    cachedLogOnDetails = details
                     user.logOn(details)
                 } catch (e: Exception) {
-                    loginResult.complete(SteamLoginResult.Failure(e.message ?: e.toString()))
+                    if (!loginResult.isCompleted) loginResult.complete(SteamLoginResult.Failure(e.message ?: e.toString()))
                     user.logOff()
                 }
             }
@@ -235,13 +256,17 @@ class JavaSteamService : SteamService {
         rebuildDialogs()
     }
 
+    /**
+     * One entry per friend, not just friends we've exchanged messages with this session -
+     * otherwise a freshly logged-in account with real friends but no in-session messages yet
+     * sees a permanently blank dialogs screen with nothing to tap.
+     */
     private fun rebuildDialogs() {
-        _dialogs.value = messagesByFriend.keys.mapNotNull { friendId ->
-            val friend = friendsById[friendId] ?: return@mapNotNull null
+        _dialogs.value = friendsById.values.map { friend ->
             SteamDialog(
                 friend = friend,
-                lastMessage = messagesByFriend[friendId]?.lastOrNull(),
-                unreadCount = unreadCounts[friendId] ?: 0,
+                lastMessage = messagesByFriend[friend.steamId64]?.lastOrNull(),
+                unreadCount = unreadCounts[friend.steamId64] ?: 0,
             )
         }.sortedByDescending { it.lastMessage?.timestamp ?: 0L }
     }
