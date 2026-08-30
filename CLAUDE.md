@@ -121,6 +121,7 @@ nohup "$SDK/emulator/emulator.exe" -avd Spike36 -no-snapshot -no-boot-anim > /tm
 | Иконка лаунчера показывала Telegram | Adaptive-icon XML ссылался на `@mipmap/ic_launcher_steamchat` — **то же имя, что у самого XML** → циклическая ссылка, тихий откат на иконку приложения. Foreground обязан иметь отдельное имя (`..._foreground`). |
 | Adaptive-иконка обрезается | Маска режет до центральных ~2/3. Логотип должен быть вписан в 66% канвы (генератор в истории коммитов это уже делает). |
 | `adb pull` из Git Bash | Пути ломаются. Использовать `MSYS_NO_PATHCONV=1` и `//sdcard/file.png` (двойной слэш). |
+| **codebase-memory не стартует** — `DACL entry grants mutation rights to untrusted identity` | Сервер намеренно отказывается работать, если в его кэш может писать посторонняя учётка (риск подмены индекса). Было: `CodexSandboxUsers` + два осиротевших SID имели Modify на `C:\Users\marat\AppData` и `C:\Users\marat\.cache`. Убрано 30.08.2026, бэкап прав с командой отката: `C:\Users\marat\acl-backup-before-cbm-fix.txt`. Если ошибка вернётся — снова почистить ACL этих папок до SYSTEM/Администраторы/владелец. |
 
 ---
 
@@ -213,7 +214,16 @@ XP-прогресс внутри уровня (`2 350 / 3 500`) отдельно
 - **`impeccable`** (в проекте) — дизайн-аудит UI: `/impeccable audit|critique|polish`, 61 правило.
 - **`apple-design`** (глобально) — отзывчивость, фидбэк на нажатие, физика движения.
 - **`emil-design-eng`** (глобально) — полировка деталей и анимаций.
-- **`codebase-memory`** (глобально) — граф кода для навигации по огромной телеграмной базе.
+- **`codebase-memory`** (глобально) — **граф кода уже построен и обязателен к использованию.**
+  Проект в графе называется **`steamchat`**, режим `fast`, 353 650 узлов / 1 929 592 связи.
+  Используй его вместо слепого Grep по 1900 файлам телеграмной базы: `search_graph`
+  (найти символ), `trace_path` (кто кого вызывает), `get_architecture`, `check_index_coverage`.
+  После крупных изменений — `detect_changes`, при необходимости переиндексировать:
+  ```bash
+  EXE="/c/Users/marat/AppData/Local/Programs/codebase-memory-mcp/codebase-memory-mcp.exe"
+  "$EXE" cli --progress index_repository --repo-path C:/projects/steamchat --mode fast --name steamchat
+  ```
+  Синтаксис CLI: флаги через **дефис** и пробел (`--repo-path C:/...`), пути с прямыми слэшами.
 - **`ponytail`** — активен всегда: самое простое работающее решение, без спекулятивных абстракций.
 
 ---
