@@ -1,0 +1,213 @@
+# SteamChat
+
+Нативный Android-клиент Steam-чата, построенный на форке официального Telegram Android
+(DrKLO/Telegram) как UI-базе, с полностью заменённым бэкендом: вместо MTProto — Steam
+через JavaSteam. Полное ТЗ: `SteamChat_master_prompt.md`.
+
+**Общайся с пользователем по-русски.**
+
+---
+
+## 1. Рабочие правила этой сессии
+
+### Скриншоты и визуальная проверка — делегировать пользователю
+
+Не гоняйся за скриншотами эмулятора. Это уже съело много времени: сплэш-экран,
+ripple-эффект и иконки лаунчера — переходные/кэшируемые состояния, которые `adb screencap`
+ловит ненадёжно.
+
+**Правильно:** собери, установи, запусти — и **спроси пользователя одним вопросом**, что он
+видит на экране (используй `AskUserQuestion` с конкретными вариантами ответа). Пользователь
+сам смотрит на эмулятор и отвечает — это на порядок быстрее и надёжнее.
+
+Скриншот делай только если пользователь прямо попросил или нужно зафиксировать статичный
+экран, который точно не меняется.
+
+### Проверять, а не гадать
+
+Все крупные баги в этом проекте находились запуском, а не чтением кода. Перед тем как
+утверждать, что API существует — проверь его в исходниках/JAR. Не выдумывай сигнатуры
+методов JavaSteam или Telegram.
+
+### Не форкать монолиты Telegram
+
+`ChatMessageCell` — 29 500 строк / 340 обращений к TLRPC, `DialogCell` — 6 500 строк, их
+delegate-методы типизированы прямо `TLRPC.User`. Форкать их нельзя. Вместо этого
+переиспользуем инфраструктуру рендера (`Theme`, `BackupImageView`, `AvatarDrawable`,
+`Theme.getSelectorDrawable()`) в своих компактных ячейках под наши доменные типы —
+`SteamDialogCell` / `SteamMessageCell` уже сделаны так.
+
+---
+
+## 2. Архитектура
+
+```
+UI (org.steamchat.ui, Kotlin, внутри TMessagesProj)
+        |   использует UI-примитивы Telegram (Theme/BaseFragment/BackupImageView)
+        v
+steamchat-domain      чистый Kotlin/JVM: модели + SteamService + SessionStore + FakeSteamService
+        ^ реализует
+steamchat-steamkit    JavaSteamService поверх библиотеки JavaSteam (JVM-порт SteamKit2)
+        v
+Steam CM servers
+```
+
+**Почему три модуля, а не один:**
+
+- `TMessagesProj` сидит на Java 8 / minSdk 21, а JavaSteam требует Java 17 → Steam-слой
+  вынесен отдельно, чтобы не тащить апгрейд Java на весь телеграмный код.
+- `steamchat-steamkit` отделён от `steamchat-domain`, чтобы тяжёлые зависимости
+  (javasteam, bouncycastle) не текли в потребителей домена и юнит-тесты.
+- Через границу `SteamService` **не должен проходить ни один тип SteamKit2/JavaSteam** —
+  только доменные модели (раздел 7 ТЗ).
+
+**Ключевые файлы:**
+
+| Файл | Роль |
+|---|---|
+| `steamchat-domain/.../service/SteamService.kt` | Контракт бэкенда (login, resumeSession, flows) |
+| `steamchat-domain/.../service/FakeSteamService.kt` | Фейк для UI без Steam-аккаунта |
+| `steamchat-steamkit/.../JavaSteamService.kt` | Реальный бэкенд, вся логика колбэков Steam |
+| `TMessagesProj/src/main/kotlin/org/steamchat/ui/SteamDebugActivity.kt` | Точка входа, хост ActionBarLayout |
+| `TMessagesProj/src/main/kotlin/org/steamchat/ui/SteamServiceHolder.kt` | Синглтон сервиса (заменить на DI позже) |
+
+---
+
+## 3. Сборка и запуск (проверенные команды)
+
+```bash
+# Компиляция нашего Kotlin (быстро, ~10с) — основная проверка при итерациях
+JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" ./gradlew :TMessagesProj:compileDebugKotlin
+
+# Юнит-тесты доменного слоя и адаптера
+JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" ./gradlew :steamchat-domain:test :steamchat-steamkit:test
+
+# Полный APK (~2 мин; нативная часть закэширована)
+JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" ./gradlew :TMessagesProj_App:assembleAfatDebug
+```
+
+APK: `TMessagesProj_App/build/outputs/apk/afat/debug/app.apk`
+Package: `org.telegram.messenger.beta` · Activity: `org.steamchat.ui.SteamDebugActivity`
+
+```bash
+SDK="$LOCALAPPDATA/Android/Sdk"; ADB="$SDK/platform-tools/adb.exe"
+"$ADB" install -r TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+"$ADB" shell am force-stop org.telegram.messenger.beta
+"$ADB" shell am start -n org.telegram.messenger.beta/org.steamchat.ui.SteamDebugActivity
+"$ADB" logcat -d -b crash | tail -30      # проверка краша
+```
+
+Эмулятор: AVD **`Spike36`** (API 36).
+
+```bash
+nohup "$SDK/emulator/emulator.exe" -avd Spike36 -no-snapshot -no-boot-anim > /tmp/emu.log 2>&1 &
+```
+
+---
+
+## 4. Грабли, на которые уже наступали (не наступать снова)
+
+| Проблема | Причина и решение |
+|---|---|
+| **Холодный старт ~18 сек** на эмуляторе | Это не зависание. `ApplicationLoader` Telegram грузит всё своё. В логах: `ActivityTaskManager: Displayed ... +17s794ms`. Не диагностировать как краш. |
+| Эмулятор API 24 — `CertPathValidatorException` | Устаревший список корневых сертификатов в старом образе. Тестировать **только на Spike36 (API 36)**. Это не баг JavaSteam. |
+| Jetifier падает на `bcprov-jdk18on` | Байткод Java 25 новее, чем понимает ASM внутри Jetifier. Решено: `android.jetifier.ignorelist=bcprov-jdk18on` в `gradle.properties`. |
+| Дубликат `META-INF/versions/9/OSGI-INF/MANIFEST.MF` | Три jar кладут файл по одному пути. Решено: `packagingOptions.exclude` в `TMessagesProj_App/build.gradle`. |
+| `ActionBarLayout` — NPE в `addFragmentToStack` | Конструктор не инициализирует `fragmentsStack`. Нужен явный `setFragmentStack(ArrayList())`. |
+| `ActionBarLayout(ctx, main=true)` — NPE | `main=true` включает BottomSheetTabs, который жёстко лезет в статический синглтон `LaunchActivity.instance`, которого у нас нет. Использовать `main=false`. |
+| Белый экран без выхода по кнопке «назад» | Закрытие последнего фрагмента опустошало стек. Решено: `needCloseLastFragment()` вызывает `finish()`, когда в стеке ≤1 фрагмент. |
+| **Тёмная тема ломает виджеты** | Системные виджеты (EditText, hint, Button) берут цвета из темы Activity, а не из `Theme.getColor()`. Родитель темы обязан быть тёмным **и в `values/`, и в `values-v31/`** — иначе на API 31+ тихо откатывается на светлую, и текст становится тёмным на тёмном. Свои View красить явно. |
+| **Иконка-«мыло» на сплэше** | `windowSplashScreenAnimatedIcon` указывал на mipmap максимум 192px, а сплэш рендерится в 288dp (~756px) → апскейл ×4. Решено: отдельный ассет `drawable-nodpi/ic_steamchat_splash.png` 1024px. |
+| Иконка лаунчера показывала Telegram | Adaptive-icon XML ссылался на `@mipmap/ic_launcher_steamchat` — **то же имя, что у самого XML** → циклическая ссылка, тихий откат на иконку приложения. Foreground обязан иметь отдельное имя (`..._foreground`). |
+| Adaptive-иконка обрезается | Маска режет до центральных ~2/3. Логотип должен быть вписан в 66% канвы (генератор в истории коммитов это уже делает). |
+| `adb pull` из Git Bash | Пути ломаются. Использовать `MSYS_NO_PATHCONV=1` и `//sdcard/file.png` (двойной слэш). |
+
+---
+
+## 5. Что уже работает (проверено на реальном Steam-аккаунте)
+
+- Логин по username/password + Steam Guard (подтверждение в мобильном приложении).
+- **Сохранение сессии** между перезапусками (refresh-токен в Keystore-шифрованных
+  `EncryptedSharedPreferences`, `resumeSession()` без повторного Guard).
+- Список друзей с реальными аватарками (грузятся со Steam CDN), именами, онлайн-статусом.
+- Отправка и получение сообщений в реальном времени.
+- История переписки с сервера Steam (`requestMessageHistory`) — переживает перезапуск.
+- Пузыри сообщений, ripple-фидбэк на нажатии, иконка приложения и сплэш.
+- Тёмная тема (Telegram «Dark Blue») активируется в `SteamDebugActivity`.
+
+**Осознанные ограничения (не баги):**
+
+- `getMessageHistory()` держит сообщения только в памяти процесса; локальной БД нет —
+  это MVP-2 по разделу 21 ТЗ.
+- `SteamDebugActivity` — временная точка входа, не финальная навигация.
+
+---
+
+## 6. Видение продукта (макет от пользователя)
+
+Тёмная тема, тёмно-синий фон (~`#0E1621`), синий акцент, три экрана с общим нижним меню
+из 5 вкладок: **Чаты · Друзья · Игры · Уведомления · Ещё**.
+
+**Экран 1 — Чаты.** Заголовок «SteamChat», справа иконки поиска и нового сообщения. Ряд
+вкладок-фильтров: «Все чаты / Друзья / Группы» (активная — синяя таблетка). Список: круглая
+аватарка со статус-точкой (зелёная — в сети, оранжевая — отошёл/не беспокоить), жирное имя,
+серый превью последнего сообщения, время справа сверху, синий круглый бейдж непрочитанных.
+Есть групповые чаты (иконка группы) и боты (значок верификации).
+
+**Экран 2 — Чат.** Шапка: стрелка назад, маленькая аватарка, имя + зелёный подзаголовок
+«В сети», справа меню «⋮». По центру — чип-разделитель даты («Сегодня»). Входящие пузыри
+тёмно-серые слева, исходящие синие справа; время внутри пузыря снизу справа, у исходящих —
+двойная галочка прочтения. Сообщение только из эмодзи — крупнее обычного. Картинки —
+скруглённым превью с временем поверх. Внизу: скрепка, скруглённое поле «Написать
+сообщение...», иконка эмодзи.
+
+**Экран 3 — Профиль.** Заголовок «Профиль» + шестерёнка. Крупная аватарка со статус-точкой,
+имя, «В сети», строка «Steam ID: …» с кнопкой копирования. Две карточки в ряд: «Уровень»
+(крупная цифра + прогресс-бар XP «2 350 / 3 500 XP») и «Значки» (число + иконки значков).
+Карточка «Сейчас играет» с иконкой игры и статусом («Dota 2 — В главном меню»). Ниже
+список-меню со строками и шевронами: Мой профиль Steam · Игры · Друзья (127) · Группы (14) ·
+Скриншоты · Настройки.
+
+### Доступность данных Steam для этого макета (проверено по JAR JavaSteam 1.8.0)
+
+| Что нужно | Статус |
+|---|---|
+| Аватарки, имена, онлайн-статус, «сейчас играет» | ✅ уже приходит в `PersonaStateCallback` |
+| Уровень Steam | ✅ есть `CMsgClientFSGetFriendsSteamLevels` (не подключено) |
+| Значки | ✅ есть `CPlayer_GetCommunityBadgeProgress_Request` (не подключено) |
+| Список игр | ✅ есть `CPlayer_GetOwnedGames_Request` (не подключено) |
+| Эмодзи Steam | ✅ есть `CPlayer_GetEmoticonList_Request` (не подключено) |
+| Галочки прочтения ✓✓ | ⚠️ не проверено, выяснить до реализации |
+| Групповые чаты | ⚠️ в JavaSteam есть старый Chat Room API; современные группы — другой протокол, проверить |
+
+XP-прогресс внутри уровня (`2 350 / 3 500`) отдельно **не подтверждён** — не показывать
+выдуманные числа, сначала проверить, что реально возвращает Steam.
+
+---
+
+## 7. Бэклог (в порядке приоритета)
+
+1. **Нижняя навигация** (5 вкладок) — общая для экранов, живёт в `SteamDebugActivity` под `ActionBarLayout`.
+2. **Экран профиля** — начать с данных, которые уже есть (аватар, имя, статус, Steam ID,
+   «сейчас играет»); уровень/значки подключать только после проверки, что реально приходит.
+3. **Доводка экрана чата** — аватар и статус в шапке, разделители дат, скрепка/эмодзи в поле ввода.
+4. **Вкладки-фильтры и поиск** на экране чатов (поиск — локальная фильтрация; серверного
+   поиска пользователей у Steam нет).
+5. **Эмодзи Steam** (`CPlayer_GetEmoticonList_Request`) и голосовой чат — раздел 22 ТЗ (MVP-3).
+6. Уведомления: `NotificationsController` Telegram **не зависит от Firebase**, работает на
+   внутренней шине `NotificationCenter` — можно питать напрямую из колбэков JavaSteam,
+   push-сервер не нужен.
+
+---
+
+## 8. Скиллы
+
+Подключены и доступны сразу, ставить ничего не нужно:
+
+- **`impeccable`** (в проекте) — дизайн-аудит UI: `/impeccable audit|critique|polish`, 61 правило.
+- **`apple-design`** (глобально) — отзывчивость, фидбэк на нажатие, физика движения.
+- **`emil-design-eng`** (глобально) — полировка деталей и анимаций.
+- **`codebase-memory`** (глобально) — граф кода для навигации по огромной телеграмной базе.
+- **`ponytail`** — активен всегда: самое простое работающее решение, без спекулятивных абстракций.
+
+Отчёт код-ревью нашего кода: `docs/CODE_REVIEW.md`.
