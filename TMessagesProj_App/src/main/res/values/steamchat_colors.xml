@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches Telegram's "Dark Blue" palette that SteamDebugActivity activates, so the window
+         background painted before the first frame doesn't flash a different shade. -->
+    <color name="steamchat_background">#0E1621</color>
+</resources>

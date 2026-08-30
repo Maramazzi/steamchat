@@ -45,11 +45,13 @@ class SteamLoginFragment : BaseFragment() {
         usernameInput = EditText(context)
         usernameInput.hint = "Steam username"
         usernameInput.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        usernameInput.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText))
 
         passwordInput = EditText(context)
         passwordInput.hint = "Steam password"
         passwordInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         passwordInput.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        passwordInput.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText))
 
         loginButton = Button(context)
         loginButton.text = "Login"

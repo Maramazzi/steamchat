@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Splash icon/background only apply on API 31+ (see values-v31); below that this is
-         just Theme.TMessages and the system shows no splash ceremony at all. -->
-    <style name="Theme.SteamChatDebug" parent="Theme.TMessages" />
+    <!-- SteamChat is dark-first. Parent must be the DARK AppCompat theme: platform widgets
+         (EditText hints, buttons, text handles) take their default colors from the Activity
+         theme, not from Telegram's Theme.getColor() table - with a Light parent they render
+         dark-on-dark and disappear entirely once the dark palette is active.
+         Splash icon/background only apply on API 31+ (see values-v31). -->
+    <style name="Theme.SteamChatDebug" parent="Theme.AppCompat">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBarOverlay">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:colorBackground">@color/steamchat_background</item>
+        <item name="android:windowBackground">@color/steamchat_background</item>
+    </style>
 </resources>

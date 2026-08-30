@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.SteamChatDebug" parent="Theme.TMessages">
-        <item name="android:windowSplashScreenBackground">@android:color/white</item>
-        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_steamchat_foreground</item>
+    <!-- Must inherit the same dark base as values/ - inheriting Theme.TMessages here silently
+         reverted the dark parent on exactly the API levels we test on. -->
+    <style name="Theme.SteamChatDebug" parent="Theme.AppCompat">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBarOverlay">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:colorBackground">@color/steamchat_background</item>
+        <item name="android:windowBackground">@color/steamchat_background</item>
+        <item name="android:windowSplashScreenBackground">@color/steamchat_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_steamchat_splash</item>
     </style>
 </resources>
