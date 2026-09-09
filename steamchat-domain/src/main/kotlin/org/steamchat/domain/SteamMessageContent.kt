@@ -18,6 +18,9 @@ sealed interface SteamMessageContent {
     /** A Steam-hosted image the cell can load and show inline. [sourceLabel] captions the card. */
     data class Image(val url: String, val sourceLabel: String) : SteamMessageContent
 
+    /** A Steam chat upload whose extension is hidden by the UGC CDN (voice note or video). */
+    data class Media(val url: String) : SteamMessageContent
+
     /** A link worth labelling but not previewing as a picture. [sourceLabel] is null for non-Steam hosts. */
     data class Link(val url: String, val sourceLabel: String?) : SteamMessageContent
 }
@@ -27,6 +30,10 @@ private val URL_PATTERN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 // Steam serves user-uploaded chat images/screenshots from these hosts. Checked as a host suffix,
 // not a substring of the whole URL, so "evil.com/?x=steamusercontent.com" can't pose as Steam.
 private val IMAGE_HOSTS = listOf("steamusercontent.com", "steamuserimages-a.akamaihd.net")
+
+// Chat MP4 uploads use this distinct CDN host and extensionless /ugc/... URLs. Keep it separate
+// from IMAGE_HOSTS: the cell has to inspect the container before choosing voice/video rendering.
+private const val MEDIA_HOST = "steamusercontent-a.akamaihd.net"
 
 private val LABELLED_HOSTS = mapOf(
     "steamcommunity.com" to "Steam Community",
@@ -47,6 +54,7 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
     val url = match.value
     val host = hostOf(url) ?: return SteamMessageContent.Text(text)
 
+    if (host.hostMatches(MEDIA_HOST)) return SteamMessageContent.Media(url)
     IMAGE_HOSTS.firstOrNull { host.hostMatches(it) }?.let {
         return SteamMessageContent.Image(url, "Steam Community")
     }

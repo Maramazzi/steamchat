@@ -3,6 +3,7 @@ package org.steamchat.ui
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.os.Build
 import android.content.pm.PackageManager
@@ -162,6 +163,12 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
             return
         }
         actionBarLayout.fragmentStack.lastOrNull()?.onRequestPermissionsResultFragment(requestCode, permissions, grantResults)
+    }
+
+    @Deprecated("Activity result API is dictated by BaseFragment")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        actionBarLayout.fragmentStack.lastOrNull()?.onActivityResultFragment(requestCode, resultCode, data)
     }
 
     // Fragments only get onFragmentDestroy() (which runs their scope.cancel()) through

@@ -18,6 +18,21 @@ class SteamMessageContentTest {
     }
 
     @Test
+    fun `a chat ugc url becomes media but lookalikes do not`() {
+        val url = "https://steamusercontent-a.akamaihd.net/ugc/123/ABC/"
+
+        assertEquals(SteamMessageContent.Media(url), parseSteamMessageContent(url))
+        assertEquals(
+            SteamMessageContent.Media("https://edge.steamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+            parseSteamMessageContent("https://edge.steamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+        )
+        assertEquals(
+            SteamMessageContent.Link("https://notsteamusercontent-a.akamaihd.net/ugc/123/ABC/", null),
+            parseSteamMessageContent("https://notsteamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+        )
+    }
+
+    @Test
     fun `surrounding whitespace still yields a card`() {
         val url = "https://images.steamusercontent.com/ugc/1/A/"
 

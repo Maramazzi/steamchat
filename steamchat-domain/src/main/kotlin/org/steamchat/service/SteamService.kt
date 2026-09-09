@@ -77,6 +77,9 @@ interface SteamService {
 
     suspend fun sendMessage(friendSteamId64: Long, text: String)
 
+    /** Uploads an MP4 attachment; Steam publishes it to the chat when the upload is committed. */
+    suspend fun sendMedia(friendSteamId64: Long, filePath: String)
+
     suspend fun markAsRead(friendSteamId64: Long)
 
     /** Live, atomically merged history for one Steam group channel. */
@@ -86,6 +89,9 @@ interface SteamService {
     suspend fun loadOlderGroupMessages(groupId: Long, channelId: Long): Boolean
 
     suspend fun sendGroupMessage(groupId: Long, channelId: Long, text: String)
+
+    /** Group-channel counterpart of [sendMedia]. */
+    suspend fun sendGroupMedia(groupId: Long, channelId: Long, filePath: String)
 
     suspend fun markGroupChannelRead(groupId: Long, channelId: Long)
 
