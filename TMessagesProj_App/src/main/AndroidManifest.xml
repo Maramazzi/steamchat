@@ -3,21 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:installLocation="auto">
 
+    <!-- GoogleVoiceClientActivity/Service (Google Assistant "send a message via Telegram" voice
+         action) removed: zero internal references, and it's another Telegram-branded entry point
+         SteamChat has no business exposing. -->
     <application android:name="org.telegram.messenger.ApplicationLoaderImpl" tools:replace="name">
-        <service
-            android:name="org.telegram.messenger.GoogleVoiceClientService"
-            android:exported="true"
-            android:foregroundServiceType="dataSync"
-        />
-        <activity
-            android:name="org.telegram.messenger.GoogleVoiceClientActivity"
-            android:exported="true"
-        >
-            <intent-filter>
-                <action android:name="com.google.android.voicesearch.SEND_MESSAGE_TO_CONTACTS" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
-        </activity>
     </application>
 </manifest>

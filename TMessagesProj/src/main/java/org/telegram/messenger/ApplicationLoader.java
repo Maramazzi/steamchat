@@ -351,7 +351,10 @@ public class ApplicationLoader extends Application {
 
         AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
 
-        LauncherIconController.tryFixLauncherIconIfNeeded();
+        // Not called: the six LauncherIcon activity-aliases it checks were removed from the
+        // manifest (SteamDebugActivity is the only launcher entry now), and
+        // getComponentEnabledSetting() throws IllegalArgumentException for an undeclared
+        // component - this would crash on every single app start otherwise.
         ProxyRotationController.init();
     }
 

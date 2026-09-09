@@ -5,6 +5,20 @@ data class SteamUser(
     val personaName: String,
     val avatarUrl: String?,
     val status: SteamStatus,
-    /** Currently played game title, null when not in-game. */
-    val gameName: String? = null,
-)
+    val game: SteamGamePresence = SteamGamePresence.Unknown,
+) {
+    /** Compatibility view for callers that only need a display title. */
+    val gameName: String?
+        get() = (game as? SteamGamePresence.Playing)?.name
+}
+
+sealed interface SteamGamePresence {
+    data object Unknown : SteamGamePresence
+    data object NotPlaying : SteamGamePresence
+    data class Playing(
+        val appId: Int?,
+        val gameId: Long?,
+        val name: String?,
+        val richPresence: Map<String, String> = emptyMap(),
+    ) : SteamGamePresence
+}

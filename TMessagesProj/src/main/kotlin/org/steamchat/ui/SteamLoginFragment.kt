@@ -15,7 +15,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.steamchat.service.SteamLoginResult
 import org.telegram.messenger.AndroidUtilities.dp
-import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
 
 /**
@@ -24,7 +23,7 @@ import org.telegram.ui.ActionBar.Theme
  * SteamDialogsFragment - which now assumes login already happened (see SteamDialogsFragment,
  * the old hardcoded fake login call there was removed alongside this).
  */
-class SteamLoginFragment : BaseFragment() {
+class SteamLoginFragment : SteamBaseFragment() {
 
     private val service = SteamServiceHolder.service
     private val scope = CoroutineScope(Dispatchers.Main)

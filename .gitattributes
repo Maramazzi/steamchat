@@ -1,0 +1,7 @@
+# Runtime assets are parsed byte-by-byte at runtime, not compiled. On Windows,
+# core.autocrlf=true rewrites their LF into CRLF on checkout, and the parsers keep
+# the stray \r: Theme.getThemeFileValues() strips only the \n, so every *.attheme
+# value becomes "-14606047\r", Integer.parseInt throws, and every color silently
+# falls back to 0 - a fully black UI. Upstream never sees this because it builds on
+# Linux. Keep these files byte-exact on every platform.
+TMessagesProj/src/main/assets/** -text

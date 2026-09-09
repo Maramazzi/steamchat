@@ -30,4 +30,16 @@ class SteamMappingTest {
         val hash = byteArrayOf(0x42.toByte(), 0x7e.toByte(), 0xf7.toByte())
         assertEquals("https://avatars.akamai.steamstatic.com/427ef7_full.jpg", avatarUrl(hash))
     }
+
+    @Test
+    fun `game presence preserves non-app game ids and clears zero values`() {
+        val shortcut = gamePresence(0, `in`.dragonbra.javasteam.types.GameID(0x200000000L), "", emptyMap())
+        assertEquals(0x200000000L, (shortcut as org.steamchat.domain.SteamGamePresence.Playing).gameId)
+        assertNull(shortcut.appId)
+
+        assertEquals(
+            org.steamchat.domain.SteamGamePresence.NotPlaying,
+            gamePresence(0, `in`.dragonbra.javasteam.types.GameID(), "", emptyMap()),
+        )
+    }
 }

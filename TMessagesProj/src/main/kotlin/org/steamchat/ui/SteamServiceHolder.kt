@@ -4,6 +4,7 @@ import org.telegram.messenger.ApplicationLoader
 import org.steamchat.service.SteamService
 import org.steamchat.steamkit.JavaSteamService
 import org.steamchat.storage.EncryptedSessionStore
+import org.steamchat.storage.PrefsBadgesCache
 
 /**
  * Single shared backend instance so the login/dialogs/chat screens all see the same session.
@@ -12,6 +13,9 @@ import org.steamchat.storage.EncryptedSessionStore
  */
 object SteamServiceHolder {
     val service: SteamService by lazy {
-        JavaSteamService(EncryptedSessionStore(ApplicationLoader.applicationContext))
+        JavaSteamService(
+            EncryptedSessionStore(ApplicationLoader.applicationContext),
+            PrefsBadgesCache(ApplicationLoader.applicationContext),
+        )
     }
 }

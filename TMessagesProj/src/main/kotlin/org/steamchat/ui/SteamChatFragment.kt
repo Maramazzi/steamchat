@@ -1,98 +1,507 @@
 package org.steamchat.ui
 
+import android.Manifest
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.steamchat.domain.SteamMessage
+import org.steamchat.domain.SteamChatChannel
+import org.steamchat.domain.SteamChatGroup
+import org.steamchat.domain.SteamGroupMessage
+import org.steamchat.domain.SteamMessageContent
+import org.telegram.messenger.AndroidUtilities
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.R
 import org.telegram.ui.ActionBar.ActionBar
-import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
+import org.telegram.ui.Components.LayoutHelper
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 class SteamChatFragment(
     private val friendSteamId64: Long,
     private val friendName: String,
-) : BaseFragment() {
+    private val groupId: Long? = null,
+    initialGroupChannelId: Long? = null,
+) : SteamBaseFragment() {
 
     private val service = SteamServiceHolder.service
     private val scope = CoroutineScope(Dispatchers.Main)
     private val adapter = MessagesAdapter()
     private var messages: List<SteamMessage> = emptyList()
+    private var rows: List<ChatRow> = emptyList()
+    private var groupMessages: List<SteamGroupMessage> = emptyList()
+    private var groupRows: List<GroupChatRow> = emptyList()
+    private var activeGroupChannelId: Long? = initialGroupChannelId
+    private var currentGroup: SteamChatGroup? = null
+    private var groupMessagesJob: Job? = null
+    private var groupHistoryHasMore = true
+    private var loadingGroupHistory = false
+    private var groupInitialPositioned = false
+    private var lastAckedGroupTimestamp = 0
     private lateinit var recyclerView: RecyclerView
     private lateinit var input: EditText
+    private lateinit var sendButton: ImageView
+    private lateinit var header: SteamChatHeaderView
+    private lateinit var groupHeader: SteamGroupChatHeaderView
 
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(R.drawable.ic_ab_back)
-        actionBar.setTitle(friendName)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
-                if (id == -1) finishFragment()
+                when (id) {
+                    -1 -> finishFragment()
+                    MENU_CALL -> showVoiceStatus(context)
+                    MENU_SEARCH -> Toast.makeText(context, "Поиск по чату пока в разработке", Toast.LENGTH_SHORT).show()
+                    MENU_MORE -> Toast.makeText(context, "Пока в разработке", Toast.LENGTH_SHORT).show()
+                }
             }
         })
+        // The 1:1 button currently runs the isolated Steam WebRTC call experiment.
+        val menu = actionBar.createMenu()
+        menu.addItem(MENU_CALL, R.drawable.msg_voice_phone)
+        menu.addItem(MENU_SEARCH, R.drawable.msg_search)
+        menu.addItem(MENU_MORE, R.drawable.ic_ab_other)
+
+        // 52dp left margin clearing the back button, WRAP_CONTENT/MATCH_PARENT - same convention
+        // real Telegram's ChatActivity uses for its own avatarContainer (confirmed in
+        // ChatActivity.java: actionBar.addView(avatarContainer, 0, LayoutHelper.createFrame(
+        // WRAP_CONTENT, MATCH_PARENT, Gravity.TOP|LEFT, 52, 0, 52, 0))), not guessed.
+        // Explicit width, not WRAP_CONTENT: ActionBar measures this view once (while the name is
+        // still empty, before render() arrives with real data) and its custom layout doesn't
+        // re-measure a manually added child afterwards, so a WRAP_CONTENT column stayed as narrow
+        // as the status line and ellipsised the name to "Mara...". Reserve the row between the
+        // back button and the three menu icons instead.
+        val metrics = context.resources.displayMetrics
+        val screenWidthDp = metrics.widthPixels / metrics.density
+        val headerWidthDp = (screenWidthDp - HEADER_LEFT_DP - MENU_RESERVE_DP).coerceAtLeast(96f)
+        // topMargin = statusBarHeight (raw px, not dp): MATCH_PARENT here spans the ActionBar's
+        // full measured height, which on this edge-to-edge layout already includes the status bar
+        // (see CLAUDE.md's edge-to-edge grabli). Telegram's own back button/menu icons start below
+        // that reserved strip; a plain addView() doesn't, so a 0-top-margin child centers itself
+        // against the status bar + content combined and lands visibly higher than they do (same
+        // bug confirmed live on the Chats screen's brand row via uiautomator - see
+        // SteamDialogsFragment).
+        if (groupId == null) {
+            header = SteamChatHeaderView(context)
+            header.setOnClickListener { presentFragment(SteamProfileFragment(friendSteamId64, friendName)) }
+            actionBar.addView(
+                header,
+                0,
+                LayoutHelper.createFrameMarginPx(headerWidthDp.toInt(), LayoutHelper.MATCH_PARENT.toFloat(), Gravity.TOP or Gravity.LEFT, dp(HEADER_LEFT_DP), AndroidUtilities.statusBarHeight, 0, 0),
+            )
+        } else {
+            groupHeader = SteamGroupChatHeaderView(context)
+            groupHeader.contentDescription = "Вернуться к каналам группы"
+            groupHeader.setOnClickListener { finishFragment() }
+            actionBar.addView(
+                groupHeader,
+                0,
+                LayoutHelper.createFrameMarginPx(headerWidthDp.toInt(), LayoutHelper.MATCH_PARENT.toFloat(), Gravity.TOP or Gravity.LEFT, dp(HEADER_LEFT_DP), AndroidUtilities.statusBarHeight, 0, 0),
+            )
+        }
 
         val root = LinearLayout(context)
         root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        root.setBackgroundColor(SteamPalette.chatBackground)
 
         recyclerView = RecyclerView(context)
         recyclerView.layoutManager = LinearLayoutManager(context)
         recyclerView.adapter = adapter
+        recyclerView.setPadding(0, dp(8f), 0, dp(8f))
+        recyclerView.clipToPadding = false
+        if (groupId != null) {
+            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return
+                    if (layoutManager.findFirstVisibleItemPosition() <= 4) loadOlderGroupHistory()
+                }
+            })
+        }
+
+        root.addView(recyclerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(buildInputBar(context), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        fragmentView = root
+
+        if (groupId == null) {
+            scope.launch {
+                combine(service.observeCurrentUser(), service.observeFriends()) { current, friendsList ->
+                    current?.takeIf { it.steamId64 == friendSteamId64 } ?: friendsList.find { it.steamId64 == friendSteamId64 }
+                }.collect { user ->
+                    if (user == null) return@collect
+                    header.render(user)
+                }
+            }
+            scope.launch {
+                messages = service.getMessageHistory(friendSteamId64)
+                updateRows()
+                service.markAsRead(friendSteamId64)
+            }
+            scope.launch {
+                service.observeMessages(friendSteamId64).collect { incoming ->
+                    messages = messages + incoming
+                    updateRows()
+                }
+            }
+        } else {
+            scope.launch {
+                service.observeChatGroups().collect { groups ->
+                    val group = groups.firstOrNull { it.id == groupId } ?: return@collect
+                    currentGroup = group
+                    val channel = group.channels.firstOrNull { it.id == activeGroupChannelId && !it.voiceAllowed }
+                        ?: group.channels.firstOrNull { it.id == group.defaultChannelId && !it.voiceAllowed }
+                        ?: group.channels.firstOrNull { !it.voiceAllowed }
+                        ?: return@collect
+                    if (channel.id != activeGroupChannelId) selectGroupChannel(channel.id)
+                    groupHeader.render(group, channel)
+                    if (::input.isInitialized) input.hint = "Сообщение в #${channel.name.ifBlank { "канал" }}"
+                }
+            }
+            activeGroupChannelId?.let(::selectGroupChannel)
+        }
+
+        return root
+    }
+
+    private fun updateRows() {
+        rows = buildChatRows(messages)
+        adapter.notifyDataSetChanged()
+        recyclerView.scrollToPosition((rows.size - 1).coerceAtLeast(0))
+    }
+
+    private fun selectGroupChannel(channelId: Long) {
+        val selectedGroupId = groupId ?: return
+        val channel = service.observeChatGroups().value.firstOrNull { it.id == selectedGroupId }
+            ?.channels?.firstOrNull { it.id == channelId } ?: return
+        if (channel.voiceAllowed) return
+        if (activeGroupChannelId == channelId && groupMessagesJob != null) return
+        groupMessagesJob?.cancel()
+        activeGroupChannelId = channelId
+        groupMessages = emptyList()
+        groupRows = emptyList()
+        groupHistoryHasMore = true
+        loadingGroupHistory = true
+        groupInitialPositioned = false
+        lastAckedGroupTimestamp = 0
+        adapter.notifyDataSetChanged()
+
+        currentGroup?.channels?.firstOrNull { it.id == channelId }?.let { channel ->
+            groupHeader.render(currentGroup ?: return@let, channel)
+            if (::input.isInitialized) input.hint = "Сообщение в #${channel.name.ifBlank { "канал" }}"
+        }
+
+        groupMessagesJob = scope.launch {
+            launch {
+                service.observeGroupMessages(selectedGroupId, channelId).collect { list ->
+                    val previousNewest = groupMessages.lastOrNull()?.id
+                    val shouldScrollToBottom = (!groupInitialPositioned && list.isNotEmpty()) ||
+                        (isNearBottom() && list.lastOrNull()?.id != previousNewest)
+                    groupMessages = list
+                    updateGroupRows(shouldScrollToBottom)
+                    if (list.isNotEmpty()) groupInitialPositioned = true
+
+                    val latestTimestamp = list.lastOrNull()?.id?.serverTimestamp ?: 0
+                    if (latestTimestamp > lastAckedGroupTimestamp) {
+                        lastAckedGroupTimestamp = latestTimestamp
+                        launch { service.markGroupChannelRead(selectedGroupId, channelId) }
+                    }
+                }
+            }
+            groupHistoryHasMore = service.loadOlderGroupMessages(selectedGroupId, channelId)
+            loadingGroupHistory = false
+        }
+    }
+
+    private fun loadOlderGroupHistory() {
+        val selectedGroupId = groupId ?: return
+        val channelId = activeGroupChannelId ?: return
+        if (loadingGroupHistory || !groupHistoryHasMore || groupRows.isEmpty()) return
+        loadingGroupHistory = true
+        scope.launch {
+            groupHistoryHasMore = service.loadOlderGroupMessages(selectedGroupId, channelId)
+            loadingGroupHistory = false
+        }
+    }
+
+    private fun updateGroupRows(scrollToBottom: Boolean) {
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
+        val firstVisible = layoutManager?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+        val anchorId = (groupRows.getOrNull(firstVisible) as? GroupChatRow.Message)?.message?.id
+        val anchorOffset = layoutManager?.findViewByPosition(firstVisible)?.top ?: 0
+
+        groupRows = buildGroupChatRows(groupMessages)
+        adapter.notifyDataSetChanged()
+        when {
+            scrollToBottom && groupRows.isNotEmpty() -> recyclerView.scrollToPosition(groupRows.lastIndex)
+            anchorId != null -> {
+                val newPosition = groupRows.indexOfFirst { row ->
+                    row is GroupChatRow.Message && row.message.id == anchorId
+                }
+                if (newPosition >= 0) layoutManager?.scrollToPositionWithOffset(newPosition, anchorOffset)
+            }
+        }
+    }
+
+    private fun isNearBottom(): Boolean {
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return true
+        return layoutManager.findLastVisibleItemPosition() >= adapter.itemCount - 3
+    }
+
+    private fun showVoiceStatus(context: Context) {
+        val group = currentGroup
+        val channel = group?.channels?.firstOrNull { it.id == activeGroupChannelId }
+        when {
+            groupId == null -> showWebRtcProbe(context)
+            group == null || channel == null || !channel.voiceAllowed ->
+                Toast.makeText(context, "В этом канале голосовой чат отключён", Toast.LENGTH_SHORT).show()
+            else -> showVoiceChannelDialog(context, group.id, channel)
+        }
+    }
+
+    /** Opens the call screen; the screen owns the call from there, including ending it. */
+    private fun showWebRtcProbe(context: Context) {
+        if (Build.VERSION.SDK_INT >= 23 && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            getParentActivity()?.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+            return
+        }
+        presentFragment(SteamCallFragment(friendSteamId64, friendName))
+    }
+
+    override fun onRequestPermissionsResultFragment(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode != REQUEST_MICROPHONE) return
+        val activity = getParentActivity() ?: return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) showWebRtcProbe(activity)
+        else Toast.makeText(activity, "Для голосового звонка нужен доступ к микрофону", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showVoiceChannelDialog(context: Context, groupId: Long, channel: SteamChatChannel) {
+        val container = LinearLayout(context)
+        container.orientation = LinearLayout.VERTICAL
+        container.setPadding(dp(24f), dp(4f), dp(24f), dp(4f))
+
+        val note = TextView(context)
+        note.text = "Присутствие в голосовом канале без передачи звука — Steam-протокол не отдаёт аудио через этот API."
+        note.textSize = 12f
+        note.setTextColor(SteamPalette.headerSubtitle)
+        container.addView(note)
+
+        val membersLabel = TextView(context)
+        membersLabel.text = if (channel.voiceMemberSteamIds.isEmpty()) "Сейчас никого нет в голосе" else "Загрузка..."
+        membersLabel.textSize = 14f
+        membersLabel.setTextColor(SteamPalette.headerTitle)
+        membersLabel.setPadding(0, dp(14f), 0, 0)
+        container.addView(membersLabel)
+
+        val myId = service.observeCurrentUser().value?.steamId64
+        val amInVoice = myId != null && myId in channel.voiceMemberSteamIds
+
+        AlertDialog.Builder(context)
+            .setTitle("Голосовой канал: ${channel.name}")
+            .setView(container)
+            .setPositiveButton(if (amInVoice) "Покинуть" else "Присоединиться") { _, _ ->
+                scope.launch {
+                    if (amInVoice) service.leaveChannelVoice(groupId, channel.id) else service.joinChannelVoice(groupId, channel.id)
+                }
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+
+        if (channel.voiceMemberSteamIds.isNotEmpty()) {
+            scope.launch {
+                val resolved = service.resolveUsers(channel.voiceMemberSteamIds)
+                membersLabel.text = channel.voiceMemberSteamIds.joinToString(separator = "\n") { id ->
+                    "• " + (resolved.firstOrNull { it.steamId64 == id }?.personaName ?: "Steam ID $id")
+                }
+            }
+        }
+    }
+
+    private fun buildInputBar(context: Context): View {
+        val bar = LinearLayout(context)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.BOTTOM
+        bar.setBackgroundColor(SteamPalette.inputBarBackground)
+        bar.setPadding(dp(6f), dp(6f), dp(6f), dp(6f))
+
+        val attachButton = iconButton(context, R.drawable.msg_input_attach2) {
+            Toast.makeText(context, "Отправка файлов пока в разработке", Toast.LENGTH_SHORT).show()
+        }
+        bar.addView(attachButton, LinearLayout.LayoutParams(dp(40f), dp(40f)))
+
+        val pill = FrameLayout(context)
+        pill.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(20f).toFloat()
+            setColor(SteamPalette.inputField)
+        }
 
         input = EditText(context)
-        input.hint = "Message"
-        input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        input.hint = "Сообщение"
+        input.setHintTextColor(SteamPalette.inputHint)
+        input.setTextColor(SteamPalette.inputText)
+        input.background = null
+        input.textSize = 15f
+        // Grows with the text instead of scrolling a one-line field, but stops before it eats the
+        // message list on a small screen.
+        input.maxLines = 5
+        input.isSingleLine = false
+        input.setPadding(0, dp(8f), 0, dp(8f))
+        pill.addView(
+            input,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                leftMargin = dp(14f)
+                rightMargin = dp(40f)
+            },
+        )
 
-        val sendButton = TextView(context)
-        sendButton.text = "Send"
-        sendButton.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
-        sendButton.setPadding(dp(16f), dp(12f), dp(16f), dp(12f))
-        sendButton.isClickable = true
-        sendButton.background = Theme.getSelectorDrawable(true)
+        val emojiButton = iconButton(context, R.drawable.msg_emoji_smiles) {
+            // showEmoticonPicker's callback already hands back the fully-formatted insertable
+            // text (":name: " for an emoticon, "/Sticker name " for a sticker - two different
+            // shapes, decided inside the picker) - insert as-is, don't reformat it here.
+            showEmoticonPicker(context, service, scope) { text ->
+                val cursor = input.selectionStart.coerceAtLeast(0)
+                input.text.insert(cursor, text)
+            }
+        }
+        pill.addView(emojiButton, FrameLayout.LayoutParams(dp(36f), dp(36f)).apply { gravity = Gravity.BOTTOM or Gravity.END })
+
+        bar.addView(
+            pill,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = dp(4f)
+                rightMargin = dp(4f)
+                bottomMargin = dp(2f)
+            },
+        )
+
+        sendButton = ImageView(context)
+        sendButton.setImageResource(R.drawable.msg_send)
+        sendButton.colorFilter = PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
+        sendButton.scaleType = ImageView.ScaleType.CENTER
         sendButton.setOnClickListener {
             val text = input.text.toString().trim()
             if (text.isNotEmpty()) {
                 input.setText("")
-                scope.launch { service.sendMessage(friendSteamId64, text) }
+                scope.launch {
+                    try {
+                        val selectedGroupId = groupId
+                        val channelId = activeGroupChannelId
+                        if (selectedGroupId != null && channelId != null) {
+                            service.sendGroupMessage(selectedGroupId, channelId, text)
+                        } else {
+                            service.sendMessage(friendSteamId64, text)
+                        }
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Не удалось отправить сообщение. Попробуйте ещё раз", Toast.LENGTH_SHORT).show()
+                        if (input.text.isEmpty()) input.setText(text)
+                    }
+                }
             }
         }
+        bar.addView(sendButton, LinearLayout.LayoutParams(dp(40f), dp(40f)).apply { bottomMargin = dp(2f) })
 
-        val inputRow = LinearLayout(context)
-        inputRow.orientation = LinearLayout.HORIZONTAL
-        inputRow.gravity = Gravity.CENTER_VERTICAL
-        inputRow.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        inputRow.addView(sendButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = updateSendButton()
+        })
+        updateSendButton()
 
-        root.addView(recyclerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        root.addView(inputRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return bar
+    }
 
-        fragmentView = root
-
-        scope.launch {
-            messages = service.getMessageHistory(friendSteamId64)
-            adapter.notifyDataSetChanged()
-            recyclerView.scrollToPosition((messages.size - 1).coerceAtLeast(0))
-            service.markAsRead(friendSteamId64)
+    /** Send is only live when there's something to send - dimmed rather than hidden, so the bar doesn't reflow. */
+    private fun updateSendButton() {
+        val hasText = input.text.toString().isNotBlank()
+        sendButton.isEnabled = hasText
+        sendButton.alpha = if (hasText) 1f else 0.55f
+        sendButton.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (hasText) SteamPalette.accent else SteamPalette.accentDisabled)
         }
-        scope.launch {
-            service.observeMessages(friendSteamId64).collect { incoming ->
-                messages = messages + incoming
-                adapter.notifyItemInserted(messages.size - 1)
-                recyclerView.scrollToPosition(messages.size - 1)
+    }
+
+    private fun iconButton(context: Context, iconRes: Int, onClick: () -> Unit): ImageView {
+        val icon = ImageView(context)
+        icon.setImageResource(iconRes)
+        icon.colorFilter = PorterDuffColorFilter(SteamPalette.inputIcon, PorterDuff.Mode.SRC_IN)
+        icon.scaleType = ImageView.ScaleType.CENTER
+        icon.isClickable = true
+        icon.background = SteamPalette.rowSelector()
+        icon.setOnClickListener { onClick() }
+        return icon
+    }
+
+    /** Long-press actions. Plain platform dialog, same choice the profile screen's name-history popup makes. */
+    private fun showMessageMenu(context: Context, messageText: String, content: SteamMessageContent) {
+        val url = when (content) {
+            is SteamMessageContent.Image -> content.url
+            is SteamMessageContent.Link -> content.url
+            is SteamMessageContent.Text -> null
+        }
+        val actions = buildList {
+            add("Копировать текст" to { copyToClipboard(context, messageText) })
+            if (url != null) {
+                add("Открыть ссылку" to { openUrl(context, url) })
+                add("Копировать ссылку" to { copyToClipboard(context, url) })
             }
+            add("Поделиться" to { shareText(context, messageText) })
         }
+        AlertDialog.Builder(context)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
+    }
 
-        return root
+    private fun copyToClipboard(context: Context, text: String) {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("SteamChat", text))
+        Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun openUrl(context: Context, url: String) {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
+    private fun shareText(context: Context, text: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        context.startActivity(Intent.createChooser(intent, "Поделиться"))
     }
 
     override fun onFragmentDestroy() {
@@ -100,20 +509,177 @@ class SteamChatFragment(
         super.onFragmentDestroy()
     }
 
-    private inner class MessagesAdapter : RecyclerView.Adapter<MessageViewHolder>() {
+    private inner class MessagesAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MessageViewHolder {
+        override fun getItemViewType(position: Int): Int = if (groupId == null) {
+            when (rows[position]) {
+                is ChatRow.Message -> VIEW_TYPE_MESSAGE
+                is ChatRow.DateSeparator -> VIEW_TYPE_DATE
+            }
+        } else {
+            when (groupRows[position]) {
+                is GroupChatRow.Message -> VIEW_TYPE_MESSAGE
+                is GroupChatRow.DateSeparator -> VIEW_TYPE_DATE
+            }
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder = if (viewType == VIEW_TYPE_MESSAGE) {
             val cell = SteamMessageCell(parent.context)
             cell.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            return MessageViewHolder(cell)
+            cell.onLinkTap = { url -> openUrl(parent.context, url) }
+            cell.onMessageLongPress = { text, content -> showMessageMenu(parent.context, text, content) }
+            RowViewHolder(cell)
+        } else {
+            RowViewHolder(DateSeparatorCell(parent.context))
         }
 
-        override fun onBindViewHolder(holder: MessageViewHolder, position: Int) {
-            (holder.itemView as SteamMessageCell).setMessage(messages[position])
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            if (groupId == null) {
+                when (val row = rows[position]) {
+                    is ChatRow.Message ->
+                        (holder.itemView as SteamMessageCell).setMessage(row.message, row.groupedWithPrevious, scope)
+                    is ChatRow.DateSeparator -> (holder.itemView as DateSeparatorCell).setLabel(row.label)
+                }
+            } else {
+                when (val row = groupRows[position]) {
+                    is GroupChatRow.Message ->
+                        (holder.itemView as SteamMessageCell).setGroupMessage(row.message, row.groupedWithPrevious, scope)
+                    is GroupChatRow.DateSeparator -> (holder.itemView as DateSeparatorCell).setLabel(row.label)
+                }
+            }
         }
 
-        override fun getItemCount(): Int = messages.size
+        override fun getItemCount(): Int = if (groupId == null) rows.size else groupRows.size
     }
 
-    private class MessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
+    private class RowViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
+
+    companion object {
+        fun forGroup(groupId: Long, channelId: Long): SteamChatFragment =
+            SteamChatFragment(friendSteamId64 = 0L, friendName = "", groupId = groupId, initialGroupChannelId = channelId)
+
+        private const val MENU_CALL = 1
+        private const val REQUEST_MICROPHONE = 701
+        private const val MENU_SEARCH = 2
+        private const val MENU_MORE = 3
+
+        /** Same 52dp back-button clearance real ChatActivity gives its own avatarContainer. */
+        private const val HEADER_LEFT_DP = 52f
+
+        /** Room kept clear for the three ActionBar icons (call/search/menu) on the right. */
+        private const val MENU_RESERVE_DP = 152f
+        private const val VIEW_TYPE_MESSAGE = 0
+        private const val VIEW_TYPE_DATE = 1
+    }
+}
+
+private sealed interface ChatRow {
+    /** [groupedWithPrevious] = same author, same day, close in time - the cell tightens its top gap. */
+    data class Message(val message: SteamMessage, val groupedWithPrevious: Boolean) : ChatRow
+    data class DateSeparator(val label: String) : ChatRow
+}
+
+private sealed interface GroupChatRow {
+    data class Message(val message: SteamGroupMessage, val groupedWithPrevious: Boolean) : GroupChatRow
+    data class DateSeparator(val label: String) : GroupChatRow
+}
+
+/**
+ * Flattens messages into rows, inserting a date pill whenever the calendar day changes and marking
+ * runs by the same author so a burst reads as one block instead of evenly-spaced strangers. A gap
+ * longer than [GROUP_WINDOW_MS] breaks the run even for the same author, so "morning" and "evening"
+ * messages don't get glued together just because nobody else spoke in between.
+ */
+private fun buildChatRows(messages: List<SteamMessage>): List<ChatRow> {
+    val rows = mutableListOf<ChatRow>()
+    val lastDay = Calendar.getInstance()
+    val current = Calendar.getInstance()
+    var haveLastDay = false
+    var previous: SteamMessage? = null
+    for (message in messages) {
+        current.timeInMillis = message.timestamp
+        val isNewDay = !haveLastDay ||
+            current.get(Calendar.YEAR) != lastDay.get(Calendar.YEAR) ||
+            current.get(Calendar.DAY_OF_YEAR) != lastDay.get(Calendar.DAY_OF_YEAR)
+        if (isNewDay) {
+            rows += ChatRow.DateSeparator(dateChipLabel(message.timestamp))
+            lastDay.timeInMillis = message.timestamp
+            haveLastDay = true
+        }
+        val prev = previous
+        val grouped = !isNewDay &&
+            prev != null &&
+            prev.isOutgoing == message.isOutgoing &&
+            message.timestamp - prev.timestamp <= GROUP_WINDOW_MS
+        rows += ChatRow.Message(message, grouped)
+        previous = message
+    }
+    return rows
+}
+
+private fun buildGroupChatRows(messages: List<SteamGroupMessage>): List<GroupChatRow> {
+    val rows = mutableListOf<GroupChatRow>()
+    val lastDay = Calendar.getInstance()
+    val current = Calendar.getInstance()
+    var haveLastDay = false
+    var previous: SteamGroupMessage? = null
+    for (message in messages) {
+        current.timeInMillis = message.timestamp
+        val isNewDay = !haveLastDay ||
+            current.get(Calendar.YEAR) != lastDay.get(Calendar.YEAR) ||
+            current.get(Calendar.DAY_OF_YEAR) != lastDay.get(Calendar.DAY_OF_YEAR)
+        if (isNewDay) {
+            rows += GroupChatRow.DateSeparator(dateChipLabel(message.timestamp))
+            lastDay.timeInMillis = message.timestamp
+            haveLastDay = true
+        }
+        val prev = previous
+        val grouped = !isNewDay &&
+            prev != null &&
+            prev.senderSteamId64 == message.senderSteamId64 &&
+            prev.isOutgoing == message.isOutgoing &&
+            prev.isSystem == message.isSystem &&
+            message.timestamp - prev.timestamp <= GROUP_WINDOW_MS
+        rows += GroupChatRow.Message(message, grouped)
+        previous = message
+    }
+    return rows
+}
+
+private const val GROUP_WINDOW_MS = 5 * 60 * 1000L
+
+private fun dateChipLabel(timestamp: Long): String {
+    val target = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val today = Calendar.getInstance()
+    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    fun sameDay(a: Calendar, b: Calendar) = a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
+    return when {
+        sameDay(target, today) -> "Сегодня"
+        sameDay(target, yesterday) -> "Вчера"
+        else -> SimpleDateFormat("d MMMM", Locale("ru")).format(Date(timestamp))
+    }
+}
+
+/** Rounded pill chip, centered - "Сегодня"/"Вчера"/date between messages from different days. */
+private class DateSeparatorCell(context: Context) : FrameLayout(context) {
+    private val label = TextView(context)
+
+    init {
+        // Small, dark and quiet: it separates days without competing with the bubbles around it.
+        label.textSize = 11f
+        label.setTextColor(SteamPalette.separatorText)
+        label.setPadding(dp(12f), dp(4f), dp(12f), dp(4f))
+        label.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(11f).toFloat()
+            setColor(SteamPalette.separatorSurface)
+        }
+        label.alpha = 0.95f
+        addView(label, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER))
+        setPadding(0, dp(10f), 0, dp(6f))
+    }
+
+    fun setLabel(text: String) {
+        label.text = text
+    }
 }

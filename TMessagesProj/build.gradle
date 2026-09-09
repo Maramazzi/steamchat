@@ -87,6 +87,12 @@ dependencies {
     implementation project(':steamchat-steamkit')
     implementation "androidx.security:security-crypto:1.1.0"
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0"
+    // Avatar frame animation only - real APNG (confirmed: a live equipped frame is a genuine
+    // 24-frame animated PNG with partial-region compositing between frames, not simple full-frame
+    // swaps). Android's ImageDecoder has no APNG support at all. Pure Java/Kotlin, no native code
+    // (unlike this library's own gif/awebp modules, which aren't pulled in here), minSdk 21 same as
+    // this app - see SteamProfileHeaderView.
+    implementation "com.github.penfeizhou.android.animation:apng:3.0.5"
 
 //    implementation 'com.google.mlkit:translate:17.0.3'
 

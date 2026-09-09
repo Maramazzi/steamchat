@@ -13,6 +13,7 @@
 #include <voip/tgcalls/group/GroupInstanceCustomImpl.h>
 
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <map>
 
@@ -377,16 +378,21 @@ jobject asJavaFingerprint(JNIEnv *env, const std::string& hash, const std::strin
 
 extern "C" {
 
+JNIEXPORT void JNICALL Java_org_webrtc_PeerConnectionFactory_nativeInitializeAndroidGlobals(JNIEnv *, jclass);
+
 bool webrtcLoaded = false;
 
 void initWebRTC(JNIEnv *env) {
+    static std::mutex initMutex;
+    const std::lock_guard<std::mutex> lock(initMutex);
     if (webrtcLoaded) {
         return;
     }
     JavaVM* vm;
     env->GetJavaVM(&vm);
     webrtc::InitAndroid(vm);
-    webrtc::JVM::Initialize(vm);
+    // Share the Java factory's once guard: initializing JVM twice aborts the process.
+    Java_org_webrtc_PeerConnectionFactory_nativeInitializeAndroidGlobals(env, nullptr);
     rtc::InitializeSSL();
     webrtcLoaded = true;
 
@@ -399,6 +405,10 @@ void initWebRTC(JNIEnv *env) {
     DEBUG_REF("FinalStateClass");
     FinalStateClass = static_cast<jclass>(env->NewGlobalRef(env->FindClass("org/telegram/messenger/voip/Instance$FinalState")));
     FinalStateInitMethod = env->GetMethodID(FinalStateClass, "<init>", "([BLjava/lang/String;Lorg/telegram/messenger/voip/Instance$TrafficStats;Z)V");
+}
+
+JNIEXPORT void JNICALL Java_org_steamchat_voice_SteamWebRtcNative_initialize(JNIEnv *env, jclass clazz) {
+    initWebRTC(env);
 }
 
 extern "C"

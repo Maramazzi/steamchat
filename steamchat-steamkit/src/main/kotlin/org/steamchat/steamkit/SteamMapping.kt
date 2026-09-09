@@ -1,6 +1,8 @@
 package org.steamchat.steamkit
 
 import `in`.dragonbra.javasteam.enums.EPersonaState
+import `in`.dragonbra.javasteam.types.GameID
+import org.steamchat.domain.SteamGamePresence
 import org.steamchat.domain.SteamStatus
 
 internal fun EPersonaState?.toSteamStatus(): SteamStatus = when (this) {
@@ -18,4 +20,20 @@ internal fun avatarUrl(avatarHash: ByteArray?): String? {
     if (avatarHash == null || avatarHash.isEmpty() || avatarHash.all { it == 0.toByte() }) return null
     val hex = avatarHash.joinToString("") { "%02x".format(it) }
     return "https://avatars.akamai.steamstatic.com/${hex}_full.jpg"
+}
+
+internal fun gamePresence(
+    gameAppId: Int,
+    gameId: GameID,
+    gameName: String?,
+    richPresence: Map<String, String>,
+): SteamGamePresence {
+    val appId = gameAppId.takeIf { it > 0 }
+    val id = gameId.toUInt64().takeIf { it != 0L }
+    val name = gameName?.takeIf { it.isNotBlank() }
+    return if (appId == null && id == null && name == null) {
+        SteamGamePresence.NotPlaying
+    } else {
+        SteamGamePresence.Playing(appId, id, name, richPresence)
+    }
 }

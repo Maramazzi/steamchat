@@ -14,6 +14,16 @@ dependencies {
     implementation 'in.dragonbra:javasteam:1.8.0'
     // Android's built-in BouncyCastle is stripped down; JavaSteam needs the full provider (confirmed in /spike).
     implementation 'org.bouncycastle:bcprov-jdk18on:1.85.2'
+    // javasteam declares this as scope=runtime, so it's on our runtime classpath already but not
+    // the compile one - needed explicitly here because we build/read a couple of protobuf
+    // messages ourselves (FriendsLevelsHandler, owned-games request) instead of only going
+    // through typed handler methods. Version must match javasteam's own POM.
+    implementation 'com.google.protobuf:protobuf-java:4.31.1'
+    // Only for parsing the tiny ajaxaliases response (SteamNameHistory.kt) - a regex would mishandle
+    // escaped characters in arbitrary user-chosen persona names, unlike the HTML pages elsewhere in
+    // this module where regex matches structural markup, not user-controlled string content. Same
+    // version already used in TMessagesProj.
+    implementation 'com.google.code.gson:gson:2.11.0'
 
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0"
     // CompletableFuture.await(), used to bridge JavaSteam's CompletableFuture-based auth API to suspend functions.

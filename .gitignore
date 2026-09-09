@@ -31,3 +31,13 @@ spike/success.png
 
 # Claude Code session artifacts
 .claude/
+
+# Other agent/tool session state (local, not project source)
+.codex/
+.agents/
+.impeccable/
+.kotlin/
+
+# Non-Gradle IDE build output (steamchat-domain/steamchat-steamkit built via IDE run configs)
+steamchat-domain/bin/
+steamchat-steamkit/bin/
