@@ -19,7 +19,9 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,6 +61,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private val imageView = BackupImageView(context)
     private val mediaContainer = FrameLayout(context)
     private val mediaThumbnail = BackupImageView(context)
+    private val mediaVideo = TextureView(context)
+    private val mediaProgress = ProgressBar(context)
     private val mediaPlay = ImageView(context)
     private val audioRow = LinearLayout(context)
     private val audioPlay = ImageView(context)
@@ -74,8 +78,9 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private var mediaJob: Job? = null
     private var mediaPlayer: MediaPlayer? = null
     private var videoPlayer: MediaPlayer? = null
-    private var videoDialog: android.app.AlertDialog? = null
     private var playerPrepared = false
+    private var videoPrepared = false
+    private var pendingVideoUrl: String? = null
     private var mediaUrl: String? = null
     private var bindToken = 0
 
@@ -96,6 +101,15 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
         mediaThumbnail.setRoundRadius(dp(VIDEO_SIZE_DP / 2f))
         mediaContainer.addView(mediaThumbnail, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
+        mediaVideo.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) =
+                outline.setOval(0, 0, view.width, view.height)
+        }
+        mediaVideo.clipToOutline = true
+        mediaVideo.visibility = View.GONE
+        mediaContainer.addView(mediaVideo, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
+        mediaProgress.visibility = View.GONE
+        mediaContainer.addView(mediaProgress, LayoutHelper.createFrame(48, 48, Gravity.CENTER))
         mediaPlay.setImageResource(R.drawable.msg_round_play_m)
         mediaPlay.setColorFilter(SteamPalette.incomingText)
         mediaPlay.background = GradientDrawable().apply {
@@ -117,7 +131,19 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         bubble.addView(audioRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
 
         audioPlay.setOnClickListener { toggleAudio() }
-        mediaContainer.setOnClickListener { mediaUrl?.let(::showVideoDialog) }
+        mediaContainer.setOnClickListener { toggleVideo() }
+        mediaVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                pendingVideoUrl?.let { startVideo(it, surfaceTexture) }
+            }
+
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                stopVideoPlayback()
+                return true
+            }
+        }
 
         // Explicit WRAP_CONTENT, not addView(child): a *vertical* LinearLayout's default params
         // are MATCH_PARENT wide, which made the bubble size to its footer (the timestamp, plus a
@@ -155,8 +181,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
             val url = when (val current = content) {
                 is SteamMessageContent.Image -> current.url
                 is SteamMessageContent.Link -> current.url
-                is SteamMessageContent.Media -> current.url
-                is SteamMessageContent.Text, null -> null
+                is SteamMessageContent.Media, is SteamMessageContent.Text, null -> null
             }
             if (url != null) onLinkTap?.invoke(url)
         }
@@ -317,22 +342,33 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
     private fun showMedia(url: String, scope: CoroutineScope, token: Int, textColor: Int, metaColor: Int) {
         mediaUrl = url
-        mediaContainer.visibility = View.GONE
+        mediaContainer.visibility = View.VISIBLE
         audioRow.visibility = View.GONE
         imageView.visibility = View.GONE
-        sourceLabel.visibility = View.GONE
+        sourceLabel.visibility = View.VISIBLE
+        sourceLabel.text = "Загрузка медиа…"
+        sourceLabel.setTextColor(metaColor)
         mediaThumbnail.setImageDrawable(null)
+        mediaThumbnail.background = ColorDrawable(SteamPalette.separatorSurface)
+        mediaVideo.visibility = View.GONE
+        mediaProgress.visibility = View.GONE
         mediaPlay.setColorFilter(textColor)
+        mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+        mediaPlay.visibility = View.VISIBLE
+        mediaPlay.alpha = 0.55f
         audioPlay.setColorFilter(textColor)
         mediaDuration.setTextColor(metaColor)
         mediaDuration.text = "MP4"
-        showLinkFallback(url, textColor)
+        textView.visibility = View.GONE
 
         mediaJob = scope.launch {
             val info = withContext(Dispatchers.IO) { readMediaInfo(url) }
             if (token != bindToken || mediaUrl != url) return@launch
+            mediaPlay.alpha = 1f
             when (info.kind) {
                 MediaKind.IMAGE -> {
+                    stopVideoPlayback()
+                    mediaContainer.visibility = View.GONE
                     textView.visibility = View.GONE
                     imageView.visibility = View.VISIBLE
                     imageView.setImage(url, IMAGE_SIZE_HINT, ColorDrawable(SteamPalette.separatorSurface))
@@ -345,6 +381,9 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                     }
                 }
                 MediaKind.AUDIO -> {
+                    stopVideoPlayback()
+                    mediaContainer.visibility = View.GONE
+                    sourceLabel.visibility = View.GONE
                     textView.visibility = View.GONE
                     audioRow.visibility = View.VISIBLE
                     mediaDuration.text = formatDuration(info.durationMs)
@@ -352,24 +391,19 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 MediaKind.VIDEO -> {
                     textView.visibility = View.GONE
                     mediaContainer.visibility = View.VISIBLE
+                    sourceLabel.visibility = View.GONE
                     info.frame?.let(mediaThumbnail::setImageBitmap)
                 }
-                MediaKind.UNKNOWN -> Unit
+                MediaKind.UNKNOWN -> {
+                    sourceLabel.text = "Медиа"
+                }
             }
         }
     }
 
-    private fun showLinkFallback(url: String, textColor: Int) {
-        textView.visibility = View.VISIBLE
-        textView.textSize = 15f
-        textView.setTextColor(textColor)
-        textView.ellipsize = TextUtils.TruncateAt.MIDDLE
-        textView.maxLines = 2
-        textView.text = url
-    }
-
     private fun hideMediaViews() {
         mediaUrl = null
+        stopVideoPlayback()
         mediaContainer.visibility = View.GONE
         audioRow.visibility = View.GONE
         mediaThumbnail.setImageDrawable(null)
@@ -389,7 +423,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                     audioPlay.setImageResource(R.drawable.msg_round_pause_m)
                 }
             }.onFailure {
-                fallbackPlayback(url, token, player)
+                playbackFailed(url, token, player)
             }
             return
         }
@@ -413,94 +447,86 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 audioPlay.setImageResource(R.drawable.msg_round_play_m)
             }
             setOnErrorListener { failed, _, _ ->
-                fallbackPlayback(url, token, failed)
+                playbackFailed(url, token, failed)
                 true
             }
             prepareAsync()
             }
         }.onFailure {
-            fallbackPlayback(url, token, newPlayer)
+            playbackFailed(url, token, newPlayer)
         }
     }
 
-    private fun fallbackPlayback(url: String, token: Int, player: MediaPlayer) {
+    private fun playbackFailed(url: String, token: Int, player: MediaPlayer) {
         if (mediaPlayer !== player || token != bindToken || mediaUrl != url) return
         releasePlayer()
-        onLinkTap?.invoke(url)
+        showPlaybackError()
     }
 
-    private fun showVideoDialog(url: String) {
-        stopVideoPlayback()
-        val token = bindToken
-        val texture = TextureView(context).apply {
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) =
-                    outline.setOval(0, 0, view.width, view.height)
-            }
-            clipToOutline = true
-        }
-        val holder = FrameLayout(context).apply {
-            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
-            addView(
-                texture,
-                FrameLayout.LayoutParams(dp(VIDEO_DIALOG_DP.toFloat()), dp(VIDEO_DIALOG_DP.toFloat()), Gravity.CENTER),
-            )
-        }
-        val dialog = android.app.AlertDialog.Builder(context)
-            .setView(holder)
-            .setNegativeButton("Закрыть", null)
-            .create()
-        videoDialog = dialog
-        texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                val surface = Surface(surfaceTexture)
-                val newPlayer = MediaPlayer()
-                videoPlayer = newPlayer
-                runCatching {
-                    newPlayer.apply {
-                    setDataSource(url)
-                    setSurface(surface)
-                    isLooping = true
-                    setOnPreparedListener {
-                        if (videoPlayer !== it || videoDialog !== dialog || token != bindToken || mediaUrl != url) {
-                            return@setOnPreparedListener
-                        }
-                        it.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
-                        it.start()
-                    }
-                    setOnErrorListener { failed, _, _ ->
-                        fallbackVideo(url, token, dialog, failed)
-                        true
-                    }
-                    prepareAsync()
-                    }
-                }.onFailure {
-                    fallbackVideo(url, token, dialog, newPlayer)
+    private fun toggleVideo() {
+        val url = mediaUrl ?: return
+        val player = videoPlayer
+        if (videoPrepared && player != null) {
+            runCatching {
+                if (player.isPlaying) {
+                    player.pause()
+                    mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+                    mediaPlay.visibility = View.VISIBLE
+                } else {
+                    player.start()
+                    mediaPlay.visibility = View.GONE
                 }
-                surface.release()
-            }
-
-            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
-            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                if (videoDialog === dialog) stopVideoPlayback()
-                return true
-            }
+            }.onFailure { videoPlaybackFailed(url, bindToken, player) }
+            return
         }
-        dialog.setOnDismissListener {
-            if (videoDialog === dialog) {
-                videoDialog = null
-                releaseVideoPlayer()
-            }
-        }
-        dialog.show()
-    }
 
-    private fun fallbackVideo(url: String, token: Int, dialog: android.app.AlertDialog, player: MediaPlayer) {
-        if (videoPlayer !== player || videoDialog !== dialog || token != bindToken || mediaUrl != url) return
+        releasePlayer()
         stopVideoPlayback()
-        onLinkTap?.invoke(url)
+        pendingVideoUrl = url
+        mediaVideo.visibility = View.VISIBLE
+        mediaPlay.visibility = View.GONE
+        mediaProgress.visibility = View.VISIBLE
+        mediaVideo.surfaceTexture?.let { startVideo(url, it) }
     }
+
+    private fun startVideo(url: String, surfaceTexture: SurfaceTexture) {
+        if (pendingVideoUrl != url || mediaUrl != url || videoPlayer != null) return
+        val token = bindToken
+        val surface = Surface(surfaceTexture)
+        val player = MediaPlayer()
+        videoPlayer = player
+        runCatching {
+            player.apply {
+                setDataSource(url)
+                setSurface(surface)
+                isLooping = true
+                setOnPreparedListener {
+                    if (videoPlayer !== it || token != bindToken || mediaUrl != url) return@setOnPreparedListener
+                    videoPrepared = true
+                    pendingVideoUrl = null
+                    it.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
+                    mediaProgress.visibility = View.GONE
+                    mediaPlay.visibility = View.GONE
+                    it.start()
+                }
+                setOnErrorListener { failed, _, _ ->
+                    videoPlaybackFailed(url, token, failed)
+                    true
+                }
+                prepareAsync()
+            }
+        }.onFailure { videoPlaybackFailed(url, token, player) }
+        surface.release()
+    }
+
+    private fun videoPlaybackFailed(url: String, token: Int, player: MediaPlayer) {
+        if (videoPlayer !== player || token != bindToken || mediaUrl != url) return
+        stopVideoPlayback()
+        showPlaybackError()
+    }
+
+    private fun showPlaybackError() =
+        Toast.makeText(context, "Не удалось воспроизвести медиа", Toast.LENGTH_SHORT).show()
 
     private fun releaseMedia() {
         mediaJob?.cancel()
@@ -527,10 +553,13 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     }
 
     private fun stopVideoPlayback() {
-        val dialog = videoDialog
-        videoDialog = null
         releaseVideoPlayer()
-        dialog?.dismiss()
+        pendingVideoUrl = null
+        videoPrepared = false
+        mediaVideo.visibility = View.GONE
+        mediaProgress.visibility = View.GONE
+        mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+        mediaPlay.visibility = View.VISIBLE
     }
 
     private fun releaseVideoPlayer() {
@@ -599,6 +628,5 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         const val IMAGE_HEIGHT_DP = 170
         const val IMAGE_SIZE_HINT = "560_400"
         const val VIDEO_SIZE_DP = 180
-        const val VIDEO_DIALOG_DP = 300
     }
 }
