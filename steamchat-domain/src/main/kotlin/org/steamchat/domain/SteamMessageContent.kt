@@ -20,8 +20,12 @@ sealed interface SteamMessageContent {
 
     /** A link worth labelling but not previewing as a picture. [sourceLabel] is null for non-Steam hosts. */
     data class Link(val url: String, val sourceLabel: String?) : SteamMessageContent
+
+    /** A video note recorded by this client and kept on this device. */
+    data class LocalVideoNote(val path: String, val durationMs: Long) : SteamMessageContent
 }
 
+private const val LOCAL_VIDEO_NOTE_PREFIX = "steamchat-video-note|"
 private val URL_PATTERN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
 // Steam serves user-uploaded chat images/screenshots from these hosts. Checked as a host suffix,
@@ -43,6 +47,15 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
     val trimmed = text.trim()
     if (trimmed.isEmpty()) return SteamMessageContent.Text(text)
 
+    if (trimmed.startsWith(LOCAL_VIDEO_NOTE_PREFIX)) {
+        val parts = trimmed.split('|', limit = 3)
+        val durationMs = parts.getOrNull(1)?.toLongOrNull()
+        val path = parts.getOrNull(2)
+        if (durationMs != null && durationMs > 0 && !path.isNullOrBlank()) {
+            return SteamMessageContent.LocalVideoNote(path, durationMs)
+        }
+    }
+
     val match = URL_PATTERN.matchEntire(trimmed) ?: return SteamMessageContent.Text(text)
     val url = match.value
     val host = hostOf(url) ?: return SteamMessageContent.Text(text)
@@ -54,6 +67,12 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
         return SteamMessageContent.Link(url, it.value)
     }
     return SteamMessageContent.Link(url, null)
+}
+
+fun localVideoNoteMessageText(path: String, durationMs: Long): String {
+    require(path.isNotBlank() && '|' !in path) { "Invalid local video-note path" }
+    require(durationMs > 0) { "Video-note duration must be positive" }
+    return "$LOCAL_VIDEO_NOTE_PREFIX$durationMs|$path"
 }
 
 /** Exact host or a subdomain of it - never a mere substring (see IMAGE_HOSTS). */

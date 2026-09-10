@@ -71,4 +71,21 @@ class SteamMessageContentTest {
 
         assertEquals(SteamMessageContent.Image(url, "Steam Community"), parseSteamMessageContent(url))
     }
+
+    @Test
+    fun `a local video note round trips through message text`() {
+        val text = localVideoNoteMessageText("/data/user/0/org.steamchat/files/note.mp4", 4_250)
+
+        assertEquals(
+            SteamMessageContent.LocalVideoNote("/data/user/0/org.steamchat/files/note.mp4", 4_250),
+            parseSteamMessageContent(text),
+        )
+    }
+
+    @Test
+    fun `a malformed local video note stays plain text`() {
+        val text = "steamchat-video-note|zero|/tmp/note.mp4"
+
+        assertEquals(SteamMessageContent.Text(text), parseSteamMessageContent(text))
+    }
 }

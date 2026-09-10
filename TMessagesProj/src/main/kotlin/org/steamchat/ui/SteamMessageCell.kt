@@ -1,10 +1,16 @@
 package org.steamchat.ui
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
+import android.graphics.SurfaceTexture
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -43,6 +49,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private val authorAvatarDrawable = AvatarDrawable()
     private val authorView = TextView(context)
     private val imageView = BackupImageView(context)
+    private val videoNoteView = SteamVideoNoteView(context)
     private val sourceLabel = TextView(context)
     private val textView = TextView(context)
     private val footer = LinearLayout(context)
@@ -66,6 +73,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
         imageView.setRoundRadius(dp(14f))
         bubble.addView(imageView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, IMAGE_HEIGHT_DP))
+
+        bubble.addView(videoNoteView, LayoutHelper.createLinear(VIDEO_NOTE_DP, VIDEO_NOTE_DP, Gravity.CENTER_HORIZONTAL))
 
         // Explicit WRAP_CONTENT, not addView(child): a *vertical* LinearLayout's default params
         // are MATCH_PARENT wide, which made the bubble size to its footer (the timestamp, plus a
@@ -117,7 +126,14 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
      */
     fun setMessage(message: SteamMessage, groupedWithPrevious: Boolean, scope: CoroutineScope) {
         messageText = message.text
-        val content = parseSteamMessageContent(message.text)
+        val parsed = parseSteamMessageContent(message.text)
+        // The marker is an internal on-device format. A peer sending matching text must never make
+        // us interpret their input as a local filesystem path.
+        val content = if (parsed is SteamMessageContent.LocalVideoNote && !message.isOutgoing) {
+            SteamMessageContent.Text(message.text)
+        } else {
+            parsed
+        }
         this.content = content
 
         authorView.visibility = View.GONE
@@ -131,6 +147,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
         timeView.text = timeFormat.format(Date(message.timestamp))
         timeView.setTextColor(metaColor)
+        footer.visibility = View.VISIBLE
         checkView.colorFilter = PorterDuffColorFilter(metaColor, PorterDuff.Mode.SRC_IN)
         checkView.visibility = if (outgoing) View.VISIBLE else View.GONE
 
@@ -138,6 +155,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         // previous message's picture or label (RecyclerView reuse).
         when (content) {
             is SteamMessageContent.Image -> {
+                videoNoteView.clear()
+                videoNoteView.visibility = View.GONE
                 imageView.visibility = View.VISIBLE
                 imageView.setImage(content.url, IMAGE_SIZE_HINT, ColorDrawable(SteamPalette.separatorSurface))
                 sourceLabel.visibility = View.VISIBLE
@@ -146,6 +165,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 textView.visibility = View.GONE
             }
             is SteamMessageContent.Link -> {
+                videoNoteView.clear()
+                videoNoteView.visibility = View.GONE
                 imageView.visibility = View.GONE
                 imageView.setImageDrawable(null)
                 sourceLabel.visibility = if (content.sourceLabel != null) View.VISIBLE else View.GONE
@@ -160,6 +181,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 textView.text = content.url
             }
             is SteamMessageContent.Text -> {
+                videoNoteView.clear()
+                videoNoteView.visibility = View.GONE
                 imageView.visibility = View.GONE
                 imageView.setImageDrawable(null)
                 sourceLabel.visibility = View.GONE
@@ -174,11 +197,26 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 textView.textSize = if (Emoji.fullyConsistsOfEmojis(content.text)) 32f else 16f
                 textView.setTextWithEmoticons(content.text, scope)
             }
+            is SteamMessageContent.LocalVideoNote -> {
+                imageView.visibility = View.GONE
+                imageView.setImageDrawable(null)
+                sourceLabel.visibility = View.GONE
+                textView.visibility = View.GONE
+                videoNoteView.visibility = View.VISIBLE
+                videoNoteView.setVideo(content.path, content.durationMs)
+                footer.visibility = View.GONE
+            }
         }
 
         val background = GradientDrawable()
         background.cornerRadius = dp(16f).toFloat()
-        background.setColor(if (outgoing) SteamPalette.outgoingBubble else SteamPalette.incomingBubble)
+        background.setColor(
+            when {
+                content is SteamMessageContent.LocalVideoNote -> 0x00000000
+                outgoing -> SteamPalette.outgoingBubble
+                else -> SteamPalette.incomingBubble
+            },
+        )
         bubble.background = background
 
         val params = bubble.layoutParams as LayoutParams
@@ -242,5 +280,136 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
         const val IMAGE_HEIGHT_DP = 170
         const val IMAGE_SIZE_HINT = "560_400"
+        const val VIDEO_NOTE_DP = 220
+    }
+}
+
+/** Small native player clipped to a circle; one tap plays/pauses and the clip loops. */
+private class SteamVideoNoteView(context: Context) : FrameLayout(context), TextureView.SurfaceTextureListener {
+    private val texture = TextureView(context)
+    private val play = ImageView(context)
+    private val duration = TextView(context)
+    private val localLabel = TextView(context)
+    private val clipPath = Path()
+    private var path: String? = null
+    private var player: MediaPlayer? = null
+    private var prepared = false
+
+    init {
+        setWillNotDraw(false)
+        texture.surfaceTextureListener = this
+        addView(texture, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.FILL))
+
+        play.setImageResource(R.drawable.play_mini_video)
+        play.setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
+        play.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x66000000)
+        }
+        addView(play, LayoutHelper.createFrame(56, 56, Gravity.CENTER))
+
+        duration.textSize = 11f
+        duration.setTextColor(0xFFFFFFFF.toInt())
+        duration.setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
+        duration.background = GradientDrawable().apply {
+            cornerRadius = dp(10f).toFloat()
+            setColor(0x66000000)
+        }
+        addView(duration, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT.toFloat(), LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0f, 0f, 0f, 10f))
+
+        localLabel.text = "На устройстве"
+        localLabel.textSize = 10f
+        localLabel.setTextColor(0xFFFFFFFF.toInt())
+        localLabel.setPadding(dp(7f), dp(3f), dp(7f), dp(3f))
+        localLabel.background = GradientDrawable().apply {
+            cornerRadius = dp(10f).toFloat()
+            setColor(0x66000000)
+        }
+        addView(localLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT.toFloat(), LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.CENTER_HORIZONTAL, 0f, 10f, 0f, 0f))
+
+        setOnClickListener {
+            if (!prepared) return@setOnClickListener
+            val current = player ?: return@setOnClickListener
+            if (current.isPlaying) {
+                current.pause()
+                play.visibility = View.VISIBLE
+            } else {
+                current.start()
+                play.visibility = View.GONE
+            }
+        }
+    }
+
+    fun setVideo(path: String, durationMs: Long) {
+        duration.text = "%d:%02d".format(durationMs / 60_000, durationMs / 1_000 % 60)
+        if (this.path == path && player != null) return
+        this.path = path
+        releasePlayer()
+        scaleX = 0.78f
+        scaleY = 0.78f
+        alpha = 0f
+        animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(260).start()
+        if (texture.isAvailable) preparePlayer()
+    }
+
+    fun clear() {
+        path = null
+        releasePlayer()
+    }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        canvas.save()
+        clipPath.rewind()
+        clipPath.addCircle(width / 2f, height / 2f, minOf(width, height) / 2f, Path.Direction.CW)
+        canvas.clipPath(clipPath)
+        super.dispatchDraw(canvas)
+        canvas.restore()
+    }
+
+    private fun preparePlayer() {
+        val videoPath = path ?: return
+        val surfaceTexture = texture.surfaceTexture ?: return
+        val mediaPlayer = MediaPlayer()
+        try {
+            mediaPlayer.setDataSource(videoPath)
+            val surface = Surface(surfaceTexture)
+            mediaPlayer.setSurface(surface)
+            surface.release()
+            mediaPlayer.isLooping = true
+            mediaPlayer.setOnPreparedListener {
+                prepared = true
+                it.seekTo(1)
+                play.visibility = View.VISIBLE
+            }
+            mediaPlayer.setOnCompletionListener { play.visibility = View.VISIBLE }
+            mediaPlayer.setOnErrorListener { _, _, _ ->
+                play.visibility = View.VISIBLE
+                true
+            }
+            player = mediaPlayer
+            mediaPlayer.prepareAsync()
+        } catch (_: Exception) {
+            mediaPlayer.release()
+        }
+    }
+
+    private fun releasePlayer() {
+        player?.release()
+        player = null
+        prepared = false
+        play.visibility = View.VISIBLE
+    }
+
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = preparePlayer()
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        releasePlayer()
+        return true
+    }
+
+    override fun onDetachedFromWindow() {
+        releasePlayer()
+        super.onDetachedFromWindow()
     }
 }
