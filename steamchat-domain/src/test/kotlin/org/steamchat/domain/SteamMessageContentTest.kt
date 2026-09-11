@@ -33,6 +33,30 @@ class SteamMessageContentTest {
     }
 
     @Test
+    fun `an audio-only mp4 is a voice message despite its video mime type`() {
+        assertEquals(
+            SteamMediaKind.VOICE,
+            classifySteamMedia("video/mp4", hasVideo = false, hasAudio = true),
+        )
+    }
+
+    @Test
+    fun `an mp4 with a video track is a round video`() {
+        assertEquals(
+            SteamMediaKind.ROUND_VIDEO,
+            classifySteamMedia("video/mp4", hasVideo = true, hasAudio = true),
+        )
+    }
+
+    @Test
+    fun `video mime without readable tracks stays unknown`() {
+        assertEquals(
+            SteamMediaKind.UNKNOWN,
+            classifySteamMedia("video/mp4", hasVideo = false, hasAudio = false),
+        )
+    }
+
+    @Test
     fun `surrounding whitespace still yields a card`() {
         val url = "https://images.steamusercontent.com/ugc/1/A/"
 

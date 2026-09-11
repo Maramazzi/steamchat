@@ -1,6 +1,7 @@
 package org.steamchat.ui
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Outline
 import android.graphics.PorterDuff
@@ -30,6 +31,8 @@ import kotlinx.coroutines.withContext
 import org.steamchat.domain.SteamGroupMessage
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamMessageContent
+import org.steamchat.domain.SteamMediaKind
+import org.steamchat.domain.classifySteamMedia
 import org.steamchat.domain.parseSteamMessageContent
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.Emoji
@@ -66,6 +69,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private val mediaPlay = ImageView(context)
     private val audioRow = LinearLayout(context)
     private val audioPlay = ImageView(context)
+    private val audioProgress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal)
     private val mediaDuration = TextView(context)
     private val sourceLabel = TextView(context)
     private val textView = TextView(context)
@@ -83,6 +87,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private var pendingVideoUrl: String? = null
     private var mediaUrl: String? = null
     private var bindToken = 0
+    private val audioProgressRunnable = Runnable { updateAudioProgress() }
 
     /** Wired by SteamChatFragment, which owns navigation/clipboard - the cell just reports intent. */
     var onLinkTap: ((String) -> Unit)? = null
@@ -121,13 +126,32 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         bubble.addView(mediaContainer, LayoutHelper.createLinear(VIDEO_SIZE_DP, VIDEO_SIZE_DP))
 
         audioRow.gravity = Gravity.CENTER_VERTICAL
-        audioRow.setPadding(dp(6f), dp(6f), dp(10f), dp(2f))
+        audioRow.minimumWidth = dp(230f)
+        audioRow.setPadding(dp(6f), dp(7f), dp(12f), dp(4f))
         audioPlay.setImageResource(R.drawable.msg_round_play_m)
+        audioPlay.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x22ffffff)
+        }
         audioPlay.setPadding(dp(10f), dp(10f), dp(10f), dp(10f))
+        audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
         audioRow.addView(audioPlay, LinearLayout.LayoutParams(dp(48f), dp(48f)))
-        mediaDuration.textSize = 14f
-        mediaDuration.text = "MP4"
-        audioRow.addView(mediaDuration, LinearLayout.LayoutParams(dp(150f), LayoutParams.WRAP_CONTENT))
+
+        val audioDetails = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8f), 0, 0, 0)
+        }
+        audioProgress.max = AUDIO_PROGRESS_MAX
+        audioProgress.progress = 0
+        audioProgress.isIndeterminate = false
+        audioProgress.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        audioDetails.addView(audioProgress, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(4f)))
+        mediaDuration.textSize = 12f
+        mediaDuration.text = "0:00"
+        audioDetails.addView(mediaDuration, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(6f)
+        })
+        audioRow.addView(audioDetails, LinearLayout.LayoutParams(dp(166f), LayoutParams.WRAP_CONTENT))
         bubble.addView(audioRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
 
         audioPlay.setOnClickListener { toggleAudio() }
@@ -235,7 +259,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 imageView.setImageDrawable(null)
                 sourceLabel.visibility = View.GONE
                 textView.visibility = View.GONE
-                showMedia(content.url, scope, bindToken, textColor, metaColor)
+                showMedia(content.url, scope, bindToken, outgoing, textColor, metaColor)
             }
             is SteamMessageContent.Link -> {
                 hideMediaViews()
@@ -270,10 +294,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
             }
         }
 
-        val background = GradientDrawable()
-        background.cornerRadius = dp(16f).toFloat()
-        background.setColor(if (outgoing) SteamPalette.outgoingBubble else SteamPalette.incomingBubble)
-        bubble.background = background
+        setBubbleBackground(outgoing)
 
         val params = bubble.layoutParams as LayoutParams
         params.gravity = if (outgoing) Gravity.END else Gravity.START
@@ -340,9 +361,16 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         imageView.setImageDrawable(null)
     }
 
-    private fun showMedia(url: String, scope: CoroutineScope, token: Int, textColor: Int, metaColor: Int) {
+    private fun showMedia(
+        url: String,
+        scope: CoroutineScope,
+        token: Int,
+        outgoing: Boolean,
+        textColor: Int,
+        metaColor: Int,
+    ) {
         mediaUrl = url
-        mediaContainer.visibility = View.VISIBLE
+        mediaContainer.visibility = View.GONE
         audioRow.visibility = View.GONE
         imageView.visibility = View.GONE
         sourceLabel.visibility = View.VISIBLE
@@ -357,8 +385,11 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         mediaPlay.visibility = View.VISIBLE
         mediaPlay.alpha = 0.55f
         audioPlay.setColorFilter(textColor)
+        audioProgress.progressTintList = ColorStateList.valueOf(textColor)
+        audioProgress.progressBackgroundTintList = ColorStateList.valueOf(metaColor)
+        audioProgress.progress = 0
         mediaDuration.setTextColor(metaColor)
-        mediaDuration.text = "MP4"
+        mediaDuration.text = "0:00"
         textView.visibility = View.GONE
 
         mediaJob = scope.launch {
@@ -366,7 +397,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
             if (token != bindToken || mediaUrl != url) return@launch
             mediaPlay.alpha = 1f
             when (info.kind) {
-                MediaKind.IMAGE -> {
+                SteamMediaKind.IMAGE -> {
                     stopVideoPlayback()
                     mediaContainer.visibility = View.GONE
                     textView.visibility = View.GONE
@@ -380,21 +411,23 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                         bubble.layoutParams = it
                     }
                 }
-                MediaKind.AUDIO -> {
+                SteamMediaKind.VOICE -> {
                     stopVideoPlayback()
                     mediaContainer.visibility = View.GONE
                     sourceLabel.visibility = View.GONE
                     textView.visibility = View.GONE
                     audioRow.visibility = View.VISIBLE
                     mediaDuration.text = formatDuration(info.durationMs)
+                    setBubbleBackground(outgoing)
                 }
-                MediaKind.VIDEO -> {
+                SteamMediaKind.ROUND_VIDEO -> {
                     textView.visibility = View.GONE
                     mediaContainer.visibility = View.VISIBLE
                     sourceLabel.visibility = View.GONE
                     info.frame?.let(mediaThumbnail::setImageBitmap)
+                    bubble.background = null
                 }
-                MediaKind.UNKNOWN -> {
+                SteamMediaKind.UNKNOWN -> {
                     sourceLabel.text = "Медиа"
                 }
             }
@@ -418,9 +451,14 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 if (player.isPlaying) {
                     player.pause()
                     audioPlay.setImageResource(R.drawable.msg_round_play_m)
+                    audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+                    audioProgress.removeCallbacks(audioProgressRunnable)
+                    updateAudioProgress()
                 } else {
                     player.start()
                     audioPlay.setImageResource(R.drawable.msg_round_pause_m)
+                    audioPlay.contentDescription = "Приостановить голосовое сообщение"
+                    updateAudioProgress()
                 }
             }.onFailure {
                 playbackFailed(url, token, player)
@@ -441,10 +479,17 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 mediaDuration.text = formatDuration(it.duration.toLong())
                 it.start()
                 audioPlay.setImageResource(R.drawable.msg_round_pause_m)
+                audioPlay.contentDescription = "Приостановить голосовое сообщение"
+                updateAudioProgress()
             }
             setOnCompletionListener {
                 if (mediaPlayer !== it || token != bindToken || mediaUrl != url) return@setOnCompletionListener
+                audioProgress.removeCallbacks(audioProgressRunnable)
+                runCatching { it.seekTo(0) }
                 audioPlay.setImageResource(R.drawable.msg_round_play_m)
+                audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+                audioProgress.progress = 0
+                mediaDuration.text = formatDuration(it.duration.toLong())
             }
             setOnErrorListener { failed, _, _ ->
                 playbackFailed(url, token, failed)
@@ -461,6 +506,25 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         if (mediaPlayer !== player || token != bindToken || mediaUrl != url) return
         releasePlayer()
         showPlaybackError()
+    }
+
+    private fun updateAudioProgress() {
+        val player = mediaPlayer ?: return
+        if (!playerPrepared) return
+        val duration = runCatching { player.duration }.getOrDefault(0).coerceAtLeast(0)
+        val position = runCatching { player.currentPosition }.getOrDefault(0).coerceAtLeast(0)
+        audioProgress.progress = if (duration == 0) 0 else (position.toLong() * AUDIO_PROGRESS_MAX / duration).toInt()
+        mediaDuration.text = "${formatDuration(position.toLong())} / ${formatDuration(duration.toLong())}"
+        if (runCatching { player.isPlaying }.getOrDefault(false)) {
+            audioProgress.postDelayed(audioProgressRunnable, AUDIO_PROGRESS_TICK_MS)
+        }
+    }
+
+    private fun setBubbleBackground(outgoing: Boolean) {
+        bubble.background = GradientDrawable().apply {
+            cornerRadius = dp(16f).toFloat()
+            setColor(if (outgoing) SteamPalette.outgoingBubble else SteamPalette.incomingBubble)
+        }
     }
 
     private fun toggleVideo() {
@@ -545,11 +609,14 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     }
 
     private fun releasePlayer() {
+        audioProgress.removeCallbacks(audioProgressRunnable)
         runCatching { mediaPlayer?.release() }
         mediaPlayer = null
         playerPrepared = false
         audioPlay.isEnabled = true
         audioPlay.setImageResource(R.drawable.msg_round_play_m)
+        audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+        audioProgress.progress = 0
     }
 
     private fun stopVideoPlayback() {
@@ -567,14 +634,12 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         videoPlayer = null
     }
 
-    private enum class MediaKind { IMAGE, AUDIO, VIDEO, UNKNOWN }
-
-    private data class MediaInfo(val kind: MediaKind, val durationMs: Long = 0L, val frame: Bitmap? = null)
+    private data class MediaInfo(val kind: SteamMediaKind, val durationMs: Long = 0L, val frame: Bitmap? = null)
 
     private companion object {
         fun readMediaInfo(url: String): MediaInfo {
             val contentType = readContentType(url)
-            if (contentType?.startsWith("image/") == true) return MediaInfo(MediaKind.IMAGE)
+            if (contentType?.startsWith("image/") == true) return MediaInfo(SteamMediaKind.IMAGE)
 
             val metadata = runCatching {
             val retriever = MediaMetadataRetriever()
@@ -584,13 +649,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes"
                     val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
                     MediaInfo(
-                        when {
-                            hasVideo -> MediaKind.VIDEO
-                            hasAudio -> MediaKind.AUDIO
-                            contentType?.startsWith("video/") == true -> MediaKind.VIDEO
-                            contentType?.startsWith("audio/") == true -> MediaKind.AUDIO
-                            else -> MediaKind.UNKNOWN
-                        },
+                        classifySteamMedia(contentType, hasVideo, hasAudio),
                         duration,
                         if (hasVideo) retriever.getFrameAtTime(0) else null,
                     )
@@ -598,11 +657,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 retriever.release()
             }
             }.getOrNull()
-            return metadata ?: when {
-                contentType?.startsWith("video/") == true -> MediaInfo(MediaKind.VIDEO)
-                contentType?.startsWith("audio/") == true -> MediaInfo(MediaKind.AUDIO)
-                else -> MediaInfo(MediaKind.UNKNOWN)
-            }
+            return metadata ?: MediaInfo(classifySteamMedia(contentType, hasVideo = false, hasAudio = false))
         }
 
         private fun readContentType(url: String): String? = runCatching {
@@ -628,5 +683,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         const val IMAGE_HEIGHT_DP = 170
         const val IMAGE_SIZE_HINT = "560_400"
         const val VIDEO_SIZE_DP = 180
+        const val AUDIO_PROGRESS_MAX = 1_000
+        const val AUDIO_PROGRESS_TICK_MS = 200L
     }
 }

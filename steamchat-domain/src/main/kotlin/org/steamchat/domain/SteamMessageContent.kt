@@ -25,6 +25,17 @@ sealed interface SteamMessageContent {
     data class Link(val url: String, val sourceLabel: String?) : SteamMessageContent
 }
 
+enum class SteamMediaKind { IMAGE, VOICE, ROUND_VIDEO, UNKNOWN }
+
+/** Steam labels both voice notes and round videos as video/mp4, so tracks win over MIME. */
+fun classifySteamMedia(contentType: String?, hasVideo: Boolean, hasAudio: Boolean): SteamMediaKind = when {
+    contentType?.startsWith("image/") == true -> SteamMediaKind.IMAGE
+    hasVideo -> SteamMediaKind.ROUND_VIDEO
+    hasAudio -> SteamMediaKind.VOICE
+    contentType?.startsWith("audio/") == true -> SteamMediaKind.VOICE
+    else -> SteamMediaKind.UNKNOWN
+}
+
 private val URL_PATTERN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
 // Steam serves user-uploaded chat images/screenshots from these hosts. Checked as a host suffix,
