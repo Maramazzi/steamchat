@@ -48,6 +48,7 @@ import org.steamchat.domain.SteamMessageContent
 import org.telegram.messenger.AndroidUtilities
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.R
+import org.telegram.messenger.camera.CameraController
 import org.telegram.ui.ActionBar.ActionBar
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.LayoutHelper
@@ -353,7 +354,7 @@ class SteamChatFragment(
                     if (pendingRoundVideoFromGesture) {
                         Toast.makeText(activity, "Режим кружка: удерживайте кнопку камеры", Toast.LENGTH_SHORT).show()
                     } else {
-                        showRoundVideoRecorder(activity, gestureControlled = false)
+                        requestRoundVideo(activity, gestureControlled = false)
                     }
                 } else {
                     Toast.makeText(activity, "Для кружка нужны камера и микрофон", Toast.LENGTH_SHORT).show()
@@ -829,7 +830,12 @@ class SteamChatFragment(
                 return
             }
         }
-        showRoundVideoRecorder(context, gestureControlled)
+        val cameras = CameraController.getInstance()
+        if (cameras.isCameraInitied) {
+            showRoundVideoRecorder(context, gestureControlled)
+        } else {
+            cameras.initCamera { AndroidUtilities.runOnUIThread { showRoundVideoRecorder(context, gestureControlled) } }
+        }
     }
 
     private fun showRoundVideoRecorder(context: Context, gestureControlled: Boolean) {
