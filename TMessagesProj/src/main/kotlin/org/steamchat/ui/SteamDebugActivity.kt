@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.steamchat.domain.SteamIncomingVoiceCall
 import org.telegram.messenger.AndroidUtilities
+import org.telegram.messenger.ApplicationLoader
 import org.telegram.ui.ActionBar.ActionBarLayout
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.INavigationLayout
@@ -141,11 +142,13 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
 
     override fun onResume() {
         super.onResume()
+        ApplicationLoader.mainInterfacePaused = false
         actionBarLayout.onResume()
     }
 
     override fun onPause() {
         super.onPause()
+        ApplicationLoader.mainInterfacePaused = true
         actionBarLayout.onPause()
     }
 

@@ -833,7 +833,7 @@ class SteamChatFragment(
     }
 
     private fun showRoundVideoRecorder(context: Context, gestureControlled: Boolean) {
-        if (roundVideoRecorder != null || mediaUploadInProgress) return
+        if (isFinished || isFinishing || roundVideoRecorder != null || mediaUploadInProgress) return
         val root = fragmentView as? FrameLayout ?: return
         val overlay = FrameLayout(context).apply { setBackgroundColor(0xcc000000.toInt()) }
         val recorder = object : RoundVideoRecorder(context) {
