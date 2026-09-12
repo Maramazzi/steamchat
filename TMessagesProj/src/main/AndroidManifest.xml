@@ -119,7 +119,7 @@
 
         <activity
             android:name="org.steamchat.ui.SteamDebugActivity"
-            android:label="SteamChat Debug"
+            android:label="SteamChatX"
             android:icon="@mipmap/ic_launcher_steamchat"
             android:roundIcon="@mipmap/ic_launcher_steamchat_round"
             android:theme="@style/Theme.SteamChatDebug"

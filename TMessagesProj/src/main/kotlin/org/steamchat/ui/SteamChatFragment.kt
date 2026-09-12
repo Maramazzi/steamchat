@@ -10,7 +10,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.drawable.GradientDrawable
@@ -1014,7 +1017,7 @@ class SteamChatFragment(
 
     private fun copyToClipboard(context: Context, text: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("SteamChat", text))
+        clipboard.setPrimaryClip(ClipData.newPlainText("SteamChatX", text))
         Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
     }
 
@@ -1228,26 +1231,51 @@ private fun dateChipLabel(timestamp: Long): String {
     }
 }
 
-/** Rounded pill chip, centered - "Сегодня"/"Вчера"/date between messages from different days. */
-private class DateSeparatorCell(context: Context) : FrameLayout(context) {
+/** Dashed rule - dot - date - dot - dashed rule, always centered: the two rules share a layout
+ *  weight, so they balance around the label no matter how wide the date text is. */
+private class DateSeparatorCell(context: Context) : LinearLayout(context) {
     private val label = TextView(context)
 
     init {
-        // Small, dark and quiet: it separates days without competing with the bubbles around it.
-        label.textSize = 11f
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(16f), dp(10f), dp(16f), dp(6f))
+
+        // Small and quiet: it separates days without competing with the bubbles around it.
+        label.textSize = 12f
         label.setTextColor(SteamPalette.separatorText)
-        label.setPadding(dp(12f), dp(4f), dp(12f), dp(4f))
-        label.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(11f).toFloat()
-            setColor(SteamPalette.separatorSurface)
+        label.alpha = 0.85f
+
+        addView(DashedLineView(context), LinearLayout.LayoutParams(0, dp(1f), 1f))
+        addView(dotView(context), LinearLayout.LayoutParams(dp(4f), dp(4f)).apply { marginStart = dp(8f); marginEnd = dp(8f) })
+        addView(label, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        addView(dotView(context), LinearLayout.LayoutParams(dp(4f), dp(4f)).apply { marginStart = dp(8f); marginEnd = dp(8f) })
+        addView(DashedLineView(context), LinearLayout.LayoutParams(0, dp(1f), 1f))
+    }
+
+    private fun dotView(context: Context) = View(context).apply {
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(SteamPalette.separatorText)
         }
-        label.alpha = 0.95f
-        addView(label, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER))
-        setPadding(0, dp(10f), 0, dp(6f))
+        alpha = 0.85f
     }
 
     fun setLabel(text: String) {
         label.text = text
+    }
+}
+
+private class DashedLineView(context: Context) : View(context) {
+    private val paint = Paint().apply {
+        color = SteamPalette.separatorText
+        alpha = (0.85f * 255).toInt()
+        strokeWidth = dp(1f).toFloat()
+        pathEffect = DashPathEffect(floatArrayOf(dp(4f).toFloat(), dp(4f).toFloat()), 0f)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val y = height / 2f
+        canvas.drawLine(0f, y, width.toFloat(), y, paint)
     }
 }

@@ -21,6 +21,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
@@ -69,8 +70,9 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private val mediaPlay = ImageView(context)
     private val audioRow = LinearLayout(context)
     private val audioPlay = ImageView(context)
-    private val audioProgress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal)
-    private val mediaDuration = TextView(context)
+    private val audioProgress = SeekBar(context)
+    private val audioElapsedTime = TextView(context)
+    private val audioTotalTime = TextView(context)
     private val sourceLabel = TextView(context)
     private val textView = TextView(context)
     private val footer = LinearLayout(context)
@@ -145,18 +147,48 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         }
         audioProgress.max = AUDIO_PROGRESS_MAX
         audioProgress.progress = 0
-        audioProgress.isIndeterminate = false
         audioProgress.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        audioDetails.addView(audioProgress, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(4f)))
-        mediaDuration.textSize = 12f
-        mediaDuration.text = "0:00"
-        audioDetails.addView(mediaDuration, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(6f)
+        audioDetails.addView(audioProgress, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        val timeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        audioElapsedTime.textSize = 12f
+        audioElapsedTime.text = "0:00"
+        timeRow.addView(audioElapsedTime, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        timeRow.addView(View(context), LinearLayout.LayoutParams(0, 0, 1f))
+        audioTotalTime.textSize = 12f
+        audioTotalTime.text = "0:00"
+        timeRow.addView(audioTotalTime, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        audioDetails.addView(timeRow, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(2f)
         })
-        audioRow.addView(audioDetails, LinearLayout.LayoutParams(dp(166f), LayoutParams.WRAP_CONTENT))
+        audioRow.addView(audioDetails, LinearLayout.LayoutParams(dp(180f), LayoutParams.WRAP_CONTENT))
         bubble.addView(audioRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
 
         audioPlay.setOnClickListener { toggleAudio() }
+        audioProgress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val duration = runCatching { mediaPlayer?.duration }.getOrNull()?.coerceAtLeast(0) ?: return
+                val position = progress.toLong() * duration / AUDIO_PROGRESS_MAX
+                audioElapsedTime.text = formatDuration(position)
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                audioProgress.removeCallbacks(audioProgressRunnable)
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                val player = mediaPlayer
+                val duration = if (playerPrepared) runCatching { player?.duration }.getOrNull()?.coerceAtLeast(0) else null
+                if (player == null || duration == null) {
+                    audioProgress.progress = 0
+                    return
+                }
+                val position = (seekBar.progress.toLong() * duration / AUDIO_PROGRESS_MAX).toInt()
+                runCatching { player.seekTo(position) }
+                updateAudioProgress()
+            }
+        })
         mediaContainer.setOnClickListener { toggleVideo() }
         mediaVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
@@ -389,9 +421,12 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         audioPlay.setColorFilter(textColor)
         audioProgress.progressTintList = ColorStateList.valueOf(textColor)
         audioProgress.progressBackgroundTintList = ColorStateList.valueOf(metaColor)
+        audioProgress.thumbTintList = ColorStateList.valueOf(textColor)
         audioProgress.progress = 0
-        mediaDuration.setTextColor(metaColor)
-        mediaDuration.text = "0:00"
+        audioElapsedTime.setTextColor(metaColor)
+        audioTotalTime.setTextColor(metaColor)
+        audioElapsedTime.text = "0:00"
+        audioTotalTime.text = "0:00"
         textView.visibility = View.GONE
 
         mediaJob = scope.launch {
@@ -419,7 +454,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                     sourceLabel.visibility = View.GONE
                     textView.visibility = View.GONE
                     audioRow.visibility = View.VISIBLE
-                    mediaDuration.text = formatDuration(info.durationMs)
+                    audioTotalTime.text = formatDuration(info.durationMs)
                     setBubbleBackground(outgoing)
                 }
                 SteamMediaKind.ROUND_VIDEO -> {
@@ -478,7 +513,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 if (mediaPlayer !== it || token != bindToken || mediaUrl != url) return@setOnPreparedListener
                 playerPrepared = true
                 audioPlay.isEnabled = true
-                mediaDuration.text = formatDuration(it.duration.toLong())
+                audioTotalTime.text = formatDuration(it.duration.toLong())
                 it.start()
                 audioPlay.setImageResource(R.drawable.msg_round_pause_m)
                 audioPlay.contentDescription = "Приостановить голосовое сообщение"
@@ -491,7 +526,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 audioPlay.setImageResource(R.drawable.msg_round_play_m)
                 audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
                 audioProgress.progress = 0
-                mediaDuration.text = formatDuration(it.duration.toLong())
+                audioElapsedTime.text = "0:00"
+                audioTotalTime.text = formatDuration(it.duration.toLong())
             }
             setOnErrorListener { failed, _, _ ->
                 playbackFailed(url, token, failed)
@@ -516,7 +552,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         val duration = runCatching { player.duration }.getOrDefault(0).coerceAtLeast(0)
         val position = runCatching { player.currentPosition }.getOrDefault(0).coerceAtLeast(0)
         audioProgress.progress = if (duration == 0) 0 else (position.toLong() * AUDIO_PROGRESS_MAX / duration).toInt()
-        mediaDuration.text = "${formatDuration(position.toLong())} / ${formatDuration(duration.toLong())}"
+        audioElapsedTime.text = formatDuration(position.toLong())
+        audioTotalTime.text = formatDuration(duration.toLong())
         if (runCatching { player.isPlaying }.getOrDefault(false)) {
             audioProgress.postDelayed(audioProgressRunnable, AUDIO_PROGRESS_TICK_MS)
         }

@@ -110,9 +110,13 @@ class SteamDialogCell(context: Context) : FrameLayout(context) {
         }
         addView(unreadCounter, LayoutHelper.createFrame(20, 20f, Gravity.BOTTOM or Gravity.END, 0f, 0f, 12f, 12f))
 
-        // Hairline between rows - full width, same barely-there color the date chip already uses.
+        // Hairline between rows - transparent at both edges, solid in the middle, instead of a flat
+        // solid bar edge to edge.
         val divider = View(context)
-        divider.setBackgroundColor(SteamPalette.separatorSurface)
+        divider.background = GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(Color.TRANSPARENT, SteamPalette.separatorSurface, Color.TRANSPARENT),
+        )
         addView(divider, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 1, Gravity.BOTTOM))
     }
 

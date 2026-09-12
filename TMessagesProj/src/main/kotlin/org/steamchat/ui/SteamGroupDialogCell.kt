@@ -68,8 +68,12 @@ internal class SteamGroupDialogCell(context: Context) : FrameLayout(context) {
         }
         addView(unreadDot, LayoutHelper.createFrame(10, 10f, Gravity.BOTTOM or Gravity.END, 0f, 0f, 17f, 17f))
 
+        // Same fading hairline as SteamDialogCell - one divider look across every row type.
         val divider = View(context)
-        divider.setBackgroundColor(SteamPalette.separatorSurface)
+        divider.background = GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(android.graphics.Color.TRANSPARENT, SteamPalette.separatorSurface, android.graphics.Color.TRANSPARENT),
+        )
         addView(divider, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 1, Gravity.BOTTOM))
     }
 

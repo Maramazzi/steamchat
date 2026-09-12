@@ -27,9 +27,9 @@
 
 
     <application
-        android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="@string/AppNameBeta"
+        android:icon="@mipmap/ic_launcher_steamchat"
+        android:roundIcon="@mipmap/ic_launcher_steamchat_round"
+        android:label="SteamChatX"
         android:theme="@style/Theme.TMessages.Start"
         android:hardwareAccelerated="true"
         android:largeHeap="true"

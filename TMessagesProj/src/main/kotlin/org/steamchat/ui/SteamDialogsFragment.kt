@@ -2,6 +2,7 @@ package org.steamchat.ui
 
 import android.content.Context
 import android.app.AlertDialog
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.InputFilter
 import android.view.Gravity
@@ -92,7 +93,7 @@ class SteamDialogsFragment : SteamBaseFragment() {
         val brandIcon = ImageView(context)
         brandIcon.setImageResource(R.drawable.ic_steamchat_brand)
         val brandTitle = TextView(context)
-        brandTitle.text = "SteamChat"
+        brandTitle.text = "SteamChatX"
         brandTitle.textSize = 20f
         brandTitle.typeface = AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MEDIUM)
         brandTitle.setTextColor(SteamPalette.headerTitle)
@@ -197,23 +198,31 @@ class SteamDialogsFragment : SteamBaseFragment() {
         val custom = folders.map { SteamDialogsTab.Custom(it) to it.name }
         val all = fixed + custom
         all.forEachIndexed { index, (tab, name) ->
+            if (index > 0) addTabDivider()
             val selected = tab == selectedTab
-            val pill = TextView(folderTabs.context).apply {
+            val color = if (selected) SteamPalette.accent else SteamPalette.headerSubtitle
+            val label = TextView(folderTabs.context).apply {
                 text = name
                 textSize = 13f
-                typeface = AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MEDIUM)
+                typeface = if (selected) AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MEDIUM) else Typeface.DEFAULT
                 maxLines = 1
-                maxWidth = dp(200f)
+                maxWidth = dp(160f)
                 ellipsize = android.text.TextUtils.TruncateAt.END
-                gravity = Gravity.CENTER
+                setTextColor(color)
+            }
+            val dot = View(folderTabs.context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
+                }
+            }
+            val tabView = LinearLayout(folderTabs.context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 isFocusable = true
                 contentDescription = "$name${if (selected) ", выбрана" else ""}"
-                setPadding(dp(14f), 0, dp(14f), 0)
-                setTextColor(if (selected) android.graphics.Color.WHITE else SteamPalette.headerSubtitle)
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(15f).toFloat()
-                    setColor(if (selected) SteamPalette.accent else SteamPalette.inputField)
-                }
+                addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(dot, LinearLayout.LayoutParams(dp(4f), dp(4f)).apply { marginStart = dp(6f) })
                 setOnClickListener {
                     selectedTab = tab
                     renderTabs()
@@ -225,12 +234,36 @@ class SteamDialogsFragment : SteamBaseFragment() {
                     true
                 }
             }
-            folderTabs.addView(pill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                marginStart = dp(if (index == 0) 16f else 8f)
-                if (index == all.lastIndex) marginEnd = dp(16f)
+            folderTabs.addView(tabView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                marginStart = dp(if (index == 0) 16f else 10f)
             })
         }
+        addTabDivider()
+        val addTab = TextView(folderTabs.context).apply {
+            text = "+"
+            textSize = 16f
+            typeface = AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MEDIUM)
+            gravity = Gravity.CENTER
+            setTextColor(SteamPalette.headerSubtitle)
+            isFocusable = true
+            contentDescription = "Создать папку"
+            setOnClickListener { editFolderName(context, null) }
+        }
+        folderTabs.addView(addTab, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+            marginStart = dp(10f)
+            marginEnd = dp(16f)
+        })
+    }
+
+    private fun addTabDivider() {
+        val divider = View(folderTabs.context).apply {
+            setBackgroundColor(SteamPalette.headerSubtitle)
+            alpha = 0.35f
+        }
+        folderTabs.addView(divider, LinearLayout.LayoutParams(dp(1f), dp(14f)).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            marginStart = dp(10f)
+        })
     }
 
     private fun saveFolders(updated: List<SteamChatFolder>) {
