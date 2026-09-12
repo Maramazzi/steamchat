@@ -1,27 +1,38 @@
 package org.steamchat.ui
 
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Path
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Outline
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.view.Surface
-import android.view.TextureView
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.TextureView
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.steamchat.domain.SteamGroupMessage
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamMessageContent
+import org.steamchat.domain.SteamMediaKind
+import org.steamchat.domain.classifySteamMedia
 import org.steamchat.domain.parseSteamMessageContent
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.Emoji
@@ -30,6 +41,8 @@ import org.telegram.ui.Components.BackupImageView
 import org.telegram.ui.Components.AvatarDrawable
 import org.telegram.ui.Components.LayoutHelper
 import java.text.SimpleDateFormat
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Date
 import java.util.Locale
 
@@ -49,7 +62,15 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     private val authorAvatarDrawable = AvatarDrawable()
     private val authorView = TextView(context)
     private val imageView = BackupImageView(context)
-    private val videoNoteView = SteamVideoNoteView(context)
+    private val mediaContainer = FrameLayout(context)
+    private val mediaThumbnail = BackupImageView(context)
+    private val mediaVideo = TextureView(context)
+    private val mediaProgress = ProgressBar(context)
+    private val mediaPlay = ImageView(context)
+    private val audioRow = LinearLayout(context)
+    private val audioPlay = ImageView(context)
+    private val audioProgress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal)
+    private val mediaDuration = TextView(context)
     private val sourceLabel = TextView(context)
     private val textView = TextView(context)
     private val footer = LinearLayout(context)
@@ -58,6 +79,15 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
     private var messageText: String? = null
     private var content: SteamMessageContent? = null
+    private var mediaJob: Job? = null
+    private var mediaPlayer: MediaPlayer? = null
+    private var videoPlayer: MediaPlayer? = null
+    private var playerPrepared = false
+    private var videoPrepared = false
+    private var pendingVideoUrl: String? = null
+    private var mediaUrl: String? = null
+    private var bindToken = 0
+    private val audioProgressRunnable = Runnable { updateAudioProgress() }
 
     /** Wired by SteamChatFragment, which owns navigation/clipboard - the cell just reports intent. */
     var onLinkTap: ((String) -> Unit)? = null
@@ -74,7 +104,72 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         imageView.setRoundRadius(dp(14f))
         bubble.addView(imageView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, IMAGE_HEIGHT_DP))
 
-        bubble.addView(videoNoteView, LayoutHelper.createLinear(VIDEO_NOTE_DP, VIDEO_NOTE_DP, Gravity.CENTER_HORIZONTAL))
+        mediaThumbnail.setRoundRadius(dp(VIDEO_CORNER_DP))
+        mediaContainer.addView(mediaThumbnail, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
+        mediaVideo.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) =
+                outline.setRoundRect(0, 0, view.width, view.height, dp(VIDEO_CORNER_DP).toFloat())
+        }
+        mediaVideo.clipToOutline = true
+        mediaThumbnail.outlineProvider = mediaVideo.outlineProvider
+        mediaThumbnail.clipToOutline = true
+        mediaVideo.visibility = View.GONE
+        mediaContainer.addView(mediaVideo, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
+        mediaProgress.visibility = View.GONE
+        mediaContainer.addView(mediaProgress, LayoutHelper.createFrame(48, 48, Gravity.CENTER))
+        mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+        mediaPlay.setColorFilter(SteamPalette.incomingText)
+        mediaPlay.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x99000000.toInt())
+        }
+        mediaPlay.setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+        mediaContainer.addView(mediaPlay, LayoutHelper.createFrame(52, 52, Gravity.CENTER))
+        bubble.addView(mediaContainer, LayoutHelper.createLinear(VIDEO_SIZE_DP, VIDEO_SIZE_DP))
+
+        audioRow.gravity = Gravity.CENTER_VERTICAL
+        audioRow.minimumWidth = dp(230f)
+        audioRow.setPadding(dp(6f), dp(7f), dp(12f), dp(4f))
+        audioPlay.setImageResource(R.drawable.msg_round_play_m)
+        audioPlay.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x22ffffff)
+        }
+        audioPlay.setPadding(dp(10f), dp(10f), dp(10f), dp(10f))
+        audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+        audioRow.addView(audioPlay, LinearLayout.LayoutParams(dp(48f), dp(48f)))
+
+        val audioDetails = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8f), 0, 0, 0)
+        }
+        audioProgress.max = AUDIO_PROGRESS_MAX
+        audioProgress.progress = 0
+        audioProgress.isIndeterminate = false
+        audioProgress.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        audioDetails.addView(audioProgress, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(4f)))
+        mediaDuration.textSize = 12f
+        mediaDuration.text = "0:00"
+        audioDetails.addView(mediaDuration, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(6f)
+        })
+        audioRow.addView(audioDetails, LinearLayout.LayoutParams(dp(166f), LayoutParams.WRAP_CONTENT))
+        bubble.addView(audioRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+
+        audioPlay.setOnClickListener { toggleAudio() }
+        mediaContainer.setOnClickListener { toggleVideo() }
+        mediaVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                pendingVideoUrl?.let { startVideo(it, surfaceTexture) }
+            }
+
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                stopVideoPlayback()
+                return true
+            }
+        }
 
         // Explicit WRAP_CONTENT, not addView(child): a *vertical* LinearLayout's default params
         // are MATCH_PARENT wide, which made the bubble size to its footer (the timestamp, plus a
@@ -109,7 +204,11 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat()))
 
         bubble.setOnClickListener {
-            val url = (content as? SteamMessageContent.Image)?.url ?: (content as? SteamMessageContent.Link)?.url
+            val url = when (val current = content) {
+                is SteamMessageContent.Image -> current.url
+                is SteamMessageContent.Link -> current.url
+                is SteamMessageContent.Media, is SteamMessageContent.Text, null -> null
+            }
             if (url != null) onLinkTap?.invoke(url)
         }
         bubble.setOnLongClickListener {
@@ -125,15 +224,10 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
      * burst reads as one block instead of evenly-spaced strangers.
      */
     fun setMessage(message: SteamMessage, groupedWithPrevious: Boolean, scope: CoroutineScope) {
+        releaseMedia()
+        bindToken++
         messageText = message.text
-        val parsed = parseSteamMessageContent(message.text)
-        // The marker is an internal on-device format. A peer sending matching text must never make
-        // us interpret their input as a local filesystem path.
-        val content = if (parsed is SteamMessageContent.LocalVideoNote && !message.isOutgoing) {
-            SteamMessageContent.Text(message.text)
-        } else {
-            parsed
-        }
+        val content = parseSteamMessageContent(message.text)
         this.content = content
 
         authorView.visibility = View.GONE
@@ -147,7 +241,6 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
 
         timeView.text = timeFormat.format(Date(message.timestamp))
         timeView.setTextColor(metaColor)
-        footer.visibility = View.VISIBLE
         checkView.colorFilter = PorterDuffColorFilter(metaColor, PorterDuff.Mode.SRC_IN)
         checkView.visibility = if (outgoing) View.VISIBLE else View.GONE
 
@@ -155,8 +248,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         // previous message's picture or label (RecyclerView reuse).
         when (content) {
             is SteamMessageContent.Image -> {
-                videoNoteView.clear()
-                videoNoteView.visibility = View.GONE
+                hideMediaViews()
                 imageView.visibility = View.VISIBLE
                 imageView.setImage(content.url, IMAGE_SIZE_HINT, ColorDrawable(SteamPalette.separatorSurface))
                 sourceLabel.visibility = View.VISIBLE
@@ -164,9 +256,15 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 sourceLabel.setTextColor(metaColor)
                 textView.visibility = View.GONE
             }
+            is SteamMessageContent.Media -> {
+                imageView.visibility = View.GONE
+                imageView.setImageDrawable(null)
+                sourceLabel.visibility = View.GONE
+                textView.visibility = View.GONE
+                showMedia(content.url, scope, bindToken, outgoing, textColor, metaColor)
+            }
             is SteamMessageContent.Link -> {
-                videoNoteView.clear()
-                videoNoteView.visibility = View.GONE
+                hideMediaViews()
                 imageView.visibility = View.GONE
                 imageView.setImageDrawable(null)
                 sourceLabel.visibility = if (content.sourceLabel != null) View.VISIBLE else View.GONE
@@ -181,8 +279,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 textView.text = content.url
             }
             is SteamMessageContent.Text -> {
-                videoNoteView.clear()
-                videoNoteView.visibility = View.GONE
+                hideMediaViews()
                 imageView.visibility = View.GONE
                 imageView.setImageDrawable(null)
                 sourceLabel.visibility = View.GONE
@@ -197,27 +294,9 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 textView.textSize = if (Emoji.fullyConsistsOfEmojis(content.text)) 32f else 16f
                 textView.setTextWithEmoticons(content.text, scope)
             }
-            is SteamMessageContent.LocalVideoNote -> {
-                imageView.visibility = View.GONE
-                imageView.setImageDrawable(null)
-                sourceLabel.visibility = View.GONE
-                textView.visibility = View.GONE
-                videoNoteView.visibility = View.VISIBLE
-                videoNoteView.setVideo(content.path, content.durationMs)
-                footer.visibility = View.GONE
-            }
         }
 
-        val background = GradientDrawable()
-        background.cornerRadius = dp(16f).toFloat()
-        background.setColor(
-            when {
-                content is SteamMessageContent.LocalVideoNote -> 0x00000000
-                outgoing -> SteamPalette.outgoingBubble
-                else -> SteamPalette.incomingBubble
-            },
-        )
-        bubble.background = background
+        setBubbleBackground(outgoing)
 
         val params = bubble.layoutParams as LayoutParams
         params.gravity = if (outgoing) Gravity.END else Gravity.START
@@ -276,140 +355,338 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
     /** Keeps a bubble off the opposite margin on every screen size (portrait phones, small and large). */
     private fun bubbleMaxWidth(): Int = (resources.displayMetrics.widthPixels * 0.76f).toInt()
 
-    private companion object {
-        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-        const val IMAGE_HEIGHT_DP = 170
-        const val IMAGE_SIZE_HINT = "560_400"
-        const val VIDEO_NOTE_DP = 220
+    /** Called by the RecyclerView adapter before a cell leaves the screen. */
+    fun recycle() {
+        bindToken++
+        releaseMedia()
+        mediaThumbnail.setImageDrawable(null)
+        imageView.setImageDrawable(null)
     }
-}
 
-/** Small native player clipped to a circle; one tap plays/pauses and the clip loops. */
-private class SteamVideoNoteView(context: Context) : FrameLayout(context), TextureView.SurfaceTextureListener {
-    private val texture = TextureView(context)
-    private val play = ImageView(context)
-    private val duration = TextView(context)
-    private val localLabel = TextView(context)
-    private val clipPath = Path()
-    private var path: String? = null
-    private var player: MediaPlayer? = null
-    private var prepared = false
+    private fun showMedia(
+        url: String,
+        scope: CoroutineScope,
+        token: Int,
+        outgoing: Boolean,
+        textColor: Int,
+        metaColor: Int,
+    ) {
+        mediaUrl = url
+        mediaContainer.visibility = View.GONE
+        audioRow.visibility = View.GONE
+        imageView.visibility = View.GONE
+        sourceLabel.visibility = View.VISIBLE
+        sourceLabel.text = "Загрузка медиа…"
+        sourceLabel.setTextColor(metaColor)
+        mediaThumbnail.setImageDrawable(null)
+        mediaThumbnail.background = ColorDrawable(SteamPalette.separatorSurface)
+        mediaVideo.visibility = View.GONE
+        mediaProgress.visibility = View.GONE
+        mediaPlay.setColorFilter(textColor)
+        mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+        mediaPlay.visibility = View.VISIBLE
+        mediaPlay.alpha = 0.55f
+        audioPlay.setColorFilter(textColor)
+        audioProgress.progressTintList = ColorStateList.valueOf(textColor)
+        audioProgress.progressBackgroundTintList = ColorStateList.valueOf(metaColor)
+        audioProgress.progress = 0
+        mediaDuration.setTextColor(metaColor)
+        mediaDuration.text = "0:00"
+        textView.visibility = View.GONE
 
-    init {
-        setWillNotDraw(false)
-        texture.surfaceTextureListener = this
-        addView(texture, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.FILL))
-
-        play.setImageResource(R.drawable.play_mini_video)
-        play.setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
-        play.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0x66000000)
-        }
-        addView(play, LayoutHelper.createFrame(56, 56, Gravity.CENTER))
-
-        duration.textSize = 11f
-        duration.setTextColor(0xFFFFFFFF.toInt())
-        duration.setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
-        duration.background = GradientDrawable().apply {
-            cornerRadius = dp(10f).toFloat()
-            setColor(0x66000000)
-        }
-        addView(duration, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT.toFloat(), LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0f, 0f, 0f, 10f))
-
-        localLabel.text = "На устройстве"
-        localLabel.textSize = 10f
-        localLabel.setTextColor(0xFFFFFFFF.toInt())
-        localLabel.setPadding(dp(7f), dp(3f), dp(7f), dp(3f))
-        localLabel.background = GradientDrawable().apply {
-            cornerRadius = dp(10f).toFloat()
-            setColor(0x66000000)
-        }
-        addView(localLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT.toFloat(), LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.CENTER_HORIZONTAL, 0f, 10f, 0f, 0f))
-
-        setOnClickListener {
-            if (!prepared) return@setOnClickListener
-            val current = player ?: return@setOnClickListener
-            if (current.isPlaying) {
-                current.pause()
-                play.visibility = View.VISIBLE
-            } else {
-                current.start()
-                play.visibility = View.GONE
+        mediaJob = scope.launch {
+            val info = withContext(Dispatchers.IO) { readMediaInfo(url) }
+            if (token != bindToken || mediaUrl != url) return@launch
+            mediaPlay.alpha = 1f
+            when (info.kind) {
+                SteamMediaKind.IMAGE -> {
+                    stopVideoPlayback()
+                    mediaContainer.visibility = View.GONE
+                    textView.visibility = View.GONE
+                    imageView.visibility = View.VISIBLE
+                    imageView.setImage(url, IMAGE_SIZE_HINT, ColorDrawable(SteamPalette.separatorSurface))
+                    sourceLabel.visibility = View.VISIBLE
+                    sourceLabel.text = "Steam Community"
+                    sourceLabel.setTextColor(metaColor)
+                    (bubble.layoutParams as LayoutParams).also {
+                        it.width = bubbleMaxWidth()
+                        bubble.layoutParams = it
+                    }
+                }
+                SteamMediaKind.VOICE -> {
+                    stopVideoPlayback()
+                    mediaContainer.visibility = View.GONE
+                    sourceLabel.visibility = View.GONE
+                    textView.visibility = View.GONE
+                    audioRow.visibility = View.VISIBLE
+                    mediaDuration.text = formatDuration(info.durationMs)
+                    setBubbleBackground(outgoing)
+                }
+                SteamMediaKind.ROUND_VIDEO -> {
+                    textView.visibility = View.GONE
+                    mediaContainer.visibility = View.VISIBLE
+                    sourceLabel.visibility = View.GONE
+                    info.frame?.let(mediaThumbnail::setImageBitmap)
+                    bubble.background = null
+                }
+                SteamMediaKind.UNKNOWN -> {
+                    sourceLabel.text = "Медиа"
+                }
             }
         }
     }
 
-    fun setVideo(path: String, durationMs: Long) {
-        duration.text = "%d:%02d".format(durationMs / 60_000, durationMs / 1_000 % 60)
-        if (this.path == path && player != null) return
-        this.path = path
-        releasePlayer()
-        scaleX = 0.78f
-        scaleY = 0.78f
-        alpha = 0f
-        animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(260).start()
-        if (texture.isAvailable) preparePlayer()
+    private fun hideMediaViews() {
+        mediaUrl = null
+        stopVideoPlayback()
+        mediaContainer.visibility = View.GONE
+        audioRow.visibility = View.GONE
+        mediaThumbnail.setImageDrawable(null)
     }
 
-    fun clear() {
-        path = null
-        releasePlayer()
-    }
-
-    override fun dispatchDraw(canvas: Canvas) {
-        canvas.save()
-        clipPath.rewind()
-        clipPath.addCircle(width / 2f, height / 2f, minOf(width, height) / 2f, Path.Direction.CW)
-        canvas.clipPath(clipPath)
-        super.dispatchDraw(canvas)
-        canvas.restore()
-    }
-
-    private fun preparePlayer() {
-        val videoPath = path ?: return
-        val surfaceTexture = texture.surfaceTexture ?: return
-        val mediaPlayer = MediaPlayer()
-        try {
-            mediaPlayer.setDataSource(videoPath)
-            val surface = Surface(surfaceTexture)
-            mediaPlayer.setSurface(surface)
-            surface.release()
-            mediaPlayer.isLooping = true
-            mediaPlayer.setOnPreparedListener {
-                prepared = true
-                it.seekTo(1)
-                play.visibility = View.VISIBLE
+    private fun toggleAudio() {
+        val url = mediaUrl ?: return
+        val token = bindToken
+        val player = mediaPlayer
+        if (playerPrepared && player != null) {
+            runCatching {
+                if (player.isPlaying) {
+                    player.pause()
+                    audioPlay.setImageResource(R.drawable.msg_round_play_m)
+                    audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+                    audioProgress.removeCallbacks(audioProgressRunnable)
+                    updateAudioProgress()
+                } else {
+                    player.start()
+                    audioPlay.setImageResource(R.drawable.msg_round_pause_m)
+                    audioPlay.contentDescription = "Приостановить голосовое сообщение"
+                    updateAudioProgress()
+                }
+            }.onFailure {
+                playbackFailed(url, token, player)
             }
-            mediaPlayer.setOnCompletionListener { play.visibility = View.VISIBLE }
-            mediaPlayer.setOnErrorListener { _, _, _ ->
-                play.visibility = View.VISIBLE
+            return
+        }
+        releasePlayer()
+        audioPlay.isEnabled = false
+        val newPlayer = MediaPlayer()
+        mediaPlayer = newPlayer
+        runCatching {
+            newPlayer.apply {
+            setDataSource(url)
+            setOnPreparedListener {
+                if (mediaPlayer !== it || token != bindToken || mediaUrl != url) return@setOnPreparedListener
+                playerPrepared = true
+                audioPlay.isEnabled = true
+                mediaDuration.text = formatDuration(it.duration.toLong())
+                it.start()
+                audioPlay.setImageResource(R.drawable.msg_round_pause_m)
+                audioPlay.contentDescription = "Приостановить голосовое сообщение"
+                updateAudioProgress()
+            }
+            setOnCompletionListener {
+                if (mediaPlayer !== it || token != bindToken || mediaUrl != url) return@setOnCompletionListener
+                audioProgress.removeCallbacks(audioProgressRunnable)
+                runCatching { it.seekTo(0) }
+                audioPlay.setImageResource(R.drawable.msg_round_play_m)
+                audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+                audioProgress.progress = 0
+                mediaDuration.text = formatDuration(it.duration.toLong())
+            }
+            setOnErrorListener { failed, _, _ ->
+                playbackFailed(url, token, failed)
                 true
             }
-            player = mediaPlayer
-            mediaPlayer.prepareAsync()
-        } catch (_: Exception) {
-            mediaPlayer.release()
+            prepareAsync()
+            }
+        }.onFailure {
+            playbackFailed(url, token, newPlayer)
         }
     }
 
-    private fun releasePlayer() {
-        player?.release()
-        player = null
-        prepared = false
-        play.visibility = View.VISIBLE
+    private fun playbackFailed(url: String, token: Int, player: MediaPlayer) {
+        if (mediaPlayer !== player || token != bindToken || mediaUrl != url) return
+        releasePlayer()
+        showPlaybackError()
     }
 
-    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = preparePlayer()
-    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
-    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+    private fun updateAudioProgress() {
+        val player = mediaPlayer ?: return
+        if (!playerPrepared) return
+        val duration = runCatching { player.duration }.getOrDefault(0).coerceAtLeast(0)
+        val position = runCatching { player.currentPosition }.getOrDefault(0).coerceAtLeast(0)
+        audioProgress.progress = if (duration == 0) 0 else (position.toLong() * AUDIO_PROGRESS_MAX / duration).toInt()
+        mediaDuration.text = "${formatDuration(position.toLong())} / ${formatDuration(duration.toLong())}"
+        if (runCatching { player.isPlaying }.getOrDefault(false)) {
+            audioProgress.postDelayed(audioProgressRunnable, AUDIO_PROGRESS_TICK_MS)
+        }
+    }
+
+    private fun setBubbleBackground(outgoing: Boolean) {
+        bubble.background = GradientDrawable().apply {
+            cornerRadius = dp(16f).toFloat()
+            setColor(if (outgoing) SteamPalette.outgoingBubble else SteamPalette.incomingBubble)
+        }
+    }
+
+    private fun toggleVideo() {
+        val url = mediaUrl ?: return
+        val player = videoPlayer
+        if (videoPrepared && player != null) {
+            runCatching {
+                if (player.isPlaying) {
+                    player.pause()
+                    mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+                    mediaPlay.visibility = View.VISIBLE
+                } else {
+                    player.start()
+                    mediaPlay.visibility = View.GONE
+                }
+            }.onFailure { videoPlaybackFailed(url, bindToken, player) }
+            return
+        }
+
         releasePlayer()
-        return true
+        stopVideoPlayback()
+        pendingVideoUrl = url
+        mediaVideo.visibility = View.VISIBLE
+        mediaPlay.visibility = View.GONE
+        mediaProgress.visibility = View.VISIBLE
+        mediaVideo.surfaceTexture?.let { startVideo(url, it) }
+    }
+
+    private fun startVideo(url: String, surfaceTexture: SurfaceTexture) {
+        if (pendingVideoUrl != url || mediaUrl != url || videoPlayer != null) return
+        val token = bindToken
+        val surface = Surface(surfaceTexture)
+        val player = MediaPlayer()
+        videoPlayer = player
+        runCatching {
+            player.apply {
+                setDataSource(url)
+                setSurface(surface)
+                isLooping = true
+                setOnPreparedListener {
+                    if (videoPlayer !== it || token != bindToken || mediaUrl != url) return@setOnPreparedListener
+                    videoPrepared = true
+                    pendingVideoUrl = null
+                    it.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
+                    mediaProgress.visibility = View.GONE
+                    mediaPlay.visibility = View.GONE
+                    it.start()
+                }
+                setOnErrorListener { failed, _, _ ->
+                    videoPlaybackFailed(url, token, failed)
+                    true
+                }
+                prepareAsync()
+            }
+        }.onFailure { videoPlaybackFailed(url, token, player) }
+        surface.release()
+    }
+
+    private fun videoPlaybackFailed(url: String, token: Int, player: MediaPlayer) {
+        if (videoPlayer !== player || token != bindToken || mediaUrl != url) return
+        stopVideoPlayback()
+        showPlaybackError()
+    }
+
+    private fun showPlaybackError() =
+        Toast.makeText(context, "Не удалось воспроизвести медиа", Toast.LENGTH_SHORT).show()
+
+    private fun releaseMedia() {
+        mediaJob?.cancel()
+        mediaJob = null
+        stopPlayback()
+    }
+
+    fun stopPlayback() {
+        releasePlayer()
+        stopVideoPlayback()
     }
 
     override fun onDetachedFromWindow() {
-        releasePlayer()
+        stopPlayback()
         super.onDetachedFromWindow()
+    }
+
+    private fun releasePlayer() {
+        audioProgress.removeCallbacks(audioProgressRunnable)
+        runCatching { mediaPlayer?.release() }
+        mediaPlayer = null
+        playerPrepared = false
+        audioPlay.isEnabled = true
+        audioPlay.setImageResource(R.drawable.msg_round_play_m)
+        audioPlay.contentDescription = "Воспроизвести голосовое сообщение"
+        audioProgress.progress = 0
+    }
+
+    private fun stopVideoPlayback() {
+        releaseVideoPlayer()
+        pendingVideoUrl = null
+        videoPrepared = false
+        mediaVideo.visibility = View.GONE
+        mediaProgress.visibility = View.GONE
+        mediaPlay.setImageResource(R.drawable.msg_round_play_m)
+        mediaPlay.visibility = View.VISIBLE
+    }
+
+    private fun releaseVideoPlayer() {
+        runCatching { videoPlayer?.release() }
+        videoPlayer = null
+    }
+
+    private data class MediaInfo(val kind: SteamMediaKind, val durationMs: Long = 0L, val frame: Bitmap? = null)
+
+    private companion object {
+        fun readMediaInfo(url: String): MediaInfo {
+            val contentType = readContentType(url)
+            if (contentType?.startsWith("image/") == true) return MediaInfo(SteamMediaKind.IMAGE)
+
+            val metadata = runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(url, emptyMap())
+                val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes"
+                    val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
+                    MediaInfo(
+                        classifySteamMedia(contentType, hasVideo, hasAudio),
+                        duration,
+                        if (hasVideo) retriever.getFrameAtTime(0) else null,
+                    )
+            } finally {
+                retriever.release()
+            }
+            }.getOrNull()
+            return metadata ?: MediaInfo(classifySteamMedia(contentType, hasVideo = false, hasAudio = false))
+        }
+
+        private fun readContentType(url: String): String? = runCatching {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "HEAD"
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 10_000
+                if (connection.responseCode !in 200..299) return@runCatching null
+                connection.contentType?.substringBefore(';')?.trim()?.lowercase(Locale.US)
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+
+        fun formatDuration(milliseconds: Long): String {
+            val totalSeconds = (milliseconds.coerceAtLeast(0L) / 1_000L)
+            return "%d:%02d".format(Locale.US, totalSeconds / 60, totalSeconds % 60)
+        }
+
+        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+        const val IMAGE_HEIGHT_DP = 170
+        const val IMAGE_SIZE_HINT = "560_400"
+        const val VIDEO_SIZE_DP = 180
+        const val VIDEO_CORNER_DP = 24f
+        const val AUDIO_PROGRESS_MAX = 1_000
+        const val AUDIO_PROGRESS_TICK_MS = 200L
     }
 }

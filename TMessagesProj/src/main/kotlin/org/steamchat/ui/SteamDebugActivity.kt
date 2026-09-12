@@ -3,6 +3,7 @@ package org.steamchat.ui
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.os.Build
 import android.content.pm.PackageManager
@@ -12,6 +13,7 @@ import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.widget.Toast
 import androidx.core.view.ViewCompat
+import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +23,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.steamchat.domain.SteamIncomingVoiceCall
 import org.telegram.messenger.AndroidUtilities
+import org.telegram.messenger.ApplicationLoader
 import org.telegram.ui.ActionBar.ActionBarLayout
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.INavigationLayout
@@ -44,10 +47,13 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // SteamChat is dark-first by design. Our cells already read every color through
-        // Theme.getColor(), so switching the active theme repaints all of them - no per-view
-        // color overrides needed. "Dark Blue" is Telegram's own dark navy palette.
-        Theme.getTheme(DARK_THEME_NAME)?.let { Theme.applyTheme(it, false, true) }
+        // Install the bundled Somnolent variant before any themed views or paints are created.
+        // getAssetFile only compares file sizes and can reuse an older palette after an update.
+        val themeFile = File(cacheDir, "somnolent_github.attheme")
+        assets.open("somnolent_github.attheme").use { source ->
+            themeFile.outputStream().use { source.copyTo(it) }
+        }
+        Theme.applyThemeFile(themeFile, "Somnolent GitHub", null, false)
 
         // Normally LaunchActivity does this before any dialogs/chat UI exists. We skip
         // LaunchActivity entirely (see class doc), so without this every shared Paint these
@@ -140,11 +146,13 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
 
     override fun onResume() {
         super.onResume()
+        ApplicationLoader.mainInterfacePaused = false
         actionBarLayout.onResume()
     }
 
     override fun onPause() {
         super.onPause()
+        ApplicationLoader.mainInterfacePaused = true
         actionBarLayout.onPause()
     }
 
@@ -162,6 +170,12 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
             return
         }
         actionBarLayout.fragmentStack.lastOrNull()?.onRequestPermissionsResultFragment(requestCode, permissions, grantResults)
+    }
+
+    @Deprecated("Activity result API is dictated by BaseFragment")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        actionBarLayout.fragmentStack.lastOrNull()?.onActivityResultFragment(requestCode, resultCode, data)
     }
 
     // Fragments only get onFragmentDestroy() (which runs their scope.cancel()) through
@@ -262,7 +276,6 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
     }
 
     private companion object {
-        const val DARK_THEME_NAME = "Dark Blue"
         const val REQUEST_INCOMING_MICROPHONE = 0x531
     }
 }

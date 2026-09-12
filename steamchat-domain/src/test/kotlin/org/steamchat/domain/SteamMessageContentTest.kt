@@ -18,6 +18,52 @@ class SteamMessageContentTest {
     }
 
     @Test
+    fun `a chat ugc url becomes media but lookalikes do not`() {
+        val url = "https://steamusercontent-a.akamaihd.net/ugc/123/ABC/"
+
+        assertEquals(SteamMessageContent.Media(url), parseSteamMessageContent(url))
+        assertEquals(
+            SteamMessageContent.Media("https://edge.steamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+            parseSteamMessageContent("https://edge.steamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+        )
+        assertEquals(
+            SteamMessageContent.Link("https://notsteamusercontent-a.akamaihd.net/ugc/123/ABC/", null),
+            parseSteamMessageContent("https://notsteamusercontent-a.akamaihd.net/ugc/123/ABC/"),
+        )
+    }
+
+    @Test
+    fun `the current chat cdn host reaches media inspection instead of image rendering`() {
+        val url = "https://cdn.steamusercontent.com/ugc/12921230442949089530/ABCDEF/"
+
+        assertEquals(SteamMessageContent.Media(url), parseSteamMessageContent(url))
+    }
+
+    @Test
+    fun `an audio-only mp4 is a voice message despite its video mime type`() {
+        assertEquals(
+            SteamMediaKind.VOICE,
+            classifySteamMedia("video/mp4", hasVideo = false, hasAudio = true),
+        )
+    }
+
+    @Test
+    fun `an mp4 with a video track is a round video`() {
+        assertEquals(
+            SteamMediaKind.ROUND_VIDEO,
+            classifySteamMedia("video/mp4", hasVideo = true, hasAudio = true),
+        )
+    }
+
+    @Test
+    fun `video mime without readable tracks stays unknown`() {
+        assertEquals(
+            SteamMediaKind.UNKNOWN,
+            classifySteamMedia("video/mp4", hasVideo = false, hasAudio = false),
+        )
+    }
+
+    @Test
     fun `surrounding whitespace still yields a card`() {
         val url = "https://images.steamusercontent.com/ugc/1/A/"
 
@@ -70,22 +116,5 @@ class SteamMessageContentTest {
         val url = "https://images.steamusercontent.com/ugc/1/A/"
 
         assertEquals(SteamMessageContent.Image(url, "Steam Community"), parseSteamMessageContent(url))
-    }
-
-    @Test
-    fun `a local video note round trips through message text`() {
-        val text = localVideoNoteMessageText("/data/user/0/org.steamchat/files/note.mp4", 4_250)
-
-        assertEquals(
-            SteamMessageContent.LocalVideoNote("/data/user/0/org.steamchat/files/note.mp4", 4_250),
-            parseSteamMessageContent(text),
-        )
-    }
-
-    @Test
-    fun `a malformed local video note stays plain text`() {
-        val text = "steamchat-video-note|zero|/tmp/note.mp4"
-
-        assertEquals(SteamMessageContent.Text(text), parseSteamMessageContent(text))
     }
 }

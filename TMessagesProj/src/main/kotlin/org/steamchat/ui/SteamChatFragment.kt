@@ -1,7 +1,9 @@
 package org.steamchat.ui
 
 import android.Manifest
+import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -12,13 +14,13 @@ import android.graphics.Color
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -37,6 +39,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamChatChannel
 import org.steamchat.domain.SteamChatGroup
@@ -45,11 +48,13 @@ import org.steamchat.domain.SteamMessageContent
 import org.telegram.messenger.AndroidUtilities
 import org.telegram.messenger.AndroidUtilities.dp
 import org.telegram.messenger.R
+import org.telegram.messenger.camera.CameraController
 import org.telegram.ui.ActionBar.ActionBar
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.LayoutHelper
-import org.telegram.messenger.camera.CameraController
 import org.telegram.ui.Stories.recorder.RoundVideoRecorder
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -77,22 +82,39 @@ class SteamChatFragment(
     private var groupInitialPositioned = false
     private var lastAckedGroupTimestamp = 0
     private lateinit var recyclerView: RecyclerView
-    private lateinit var rootContainer: FrameLayout
     private lateinit var input: EditText
     private lateinit var sendButton: ImageView
+    private lateinit var attachButton: ImageView
+    private lateinit var emojiButton: ImageView
+    private lateinit var recordingRow: LinearLayout
+    private lateinit var recordingDot: View
+    private lateinit var recordingTimer: TextView
+    private lateinit var recordingHint: TextView
     private lateinit var header: SteamChatHeaderView
     private lateinit var groupHeader: SteamGroupChatHeaderView
-    private var videoRecorder: RoundVideoRecorder? = null
-    private var recordingOverlay: FrameLayout? = null
-    private var recordingPulse: ValueAnimator? = null
-    private val recordingHandler = Handler(Looper.getMainLooper())
+    private var voiceRecorder: MediaRecorder? = null
+    private var voiceFile: File? = null
+    private var voiceStartedAt = 0L
+    private var roundVideoRecorder: RoundVideoRecorder? = null
+    private var recordingOverlay: View? = null
+    private var mediaUploadInProgress = false
+    private var recordingMode = RecordingMode.VOICE
+    private var recordGestureArmed = false
+    private var recordGestureStarted = false
+    private var recordGestureCancelled = false
+    private var recordGestureDownX = 0f
+    private var startRecordingRunnable: Runnable? = null
+    private var pendingRoundVideoFromGesture = false
+    private var recordingPulse: ObjectAnimator? = null
+    private var recordingTimerRunnable: Runnable? = null
+    private var activeRecordingDot: View? = null
 
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(R.drawable.ic_ab_back)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
                 when (id) {
-                    -1 -> if (videoRecorder != null) videoRecorder?.cancel() else finishFragment()
+                    -1 -> finishFragment()
                     MENU_CALL -> showVoiceStatus(context)
                     MENU_SEARCH -> Toast.makeText(context, "Поиск по чату пока в разработке", Toast.LENGTH_SHORT).show()
                     MENU_MORE -> Toast.makeText(context, "Пока в разработке", Toast.LENGTH_SHORT).show()
@@ -143,10 +165,9 @@ class SteamChatFragment(
             )
         }
 
-        rootContainer = FrameLayout(context)
-        val root = LinearLayout(context)
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(SteamPalette.chatBackground)
+        val content = LinearLayout(context)
+        content.orientation = LinearLayout.VERTICAL
+        content.setBackgroundColor(SteamPalette.chatBackground)
 
         recyclerView = RecyclerView(context)
         recyclerView.layoutManager = LinearLayoutManager(context)
@@ -162,11 +183,13 @@ class SteamChatFragment(
             })
         }
 
-        root.addView(recyclerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        root.addView(buildInputBar(context), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(recyclerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        content.addView(buildInputBar(context), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        rootContainer.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        fragmentView = rootContainer
+        val root = FrameLayout(context)
+        root.addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        fragmentView = root
 
         if (groupId == null) {
             scope.launch {
@@ -178,9 +201,7 @@ class SteamChatFragment(
                 }
             }
             scope.launch {
-                val currentUserId = service.observeCurrentUser().value?.steamId64 ?: 0L
-                messages = (service.getMessageHistory(friendSteamId64) +
-                    SteamVideoNoteStore.load(context, friendSteamId64, currentUserId)).sortedBy { it.timestamp }
+                messages = service.getMessageHistory(friendSteamId64)
                 updateRows()
                 service.markAsRead(friendSteamId64)
             }
@@ -207,7 +228,7 @@ class SteamChatFragment(
             activeGroupChannelId?.let(::selectGroupChannel)
         }
 
-        return rootContainer
+        return root
     }
 
     private fun updateRows() {
@@ -321,9 +342,24 @@ class SteamChatFragment(
                 if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) showWebRtcProbe(activity)
                 else Toast.makeText(activity, "Для голосового звонка нужен доступ к микрофону", Toast.LENGTH_SHORT).show()
             }
-            REQUEST_VIDEO_NOTE -> {
-                if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) startVideoNote(activity)
-                else Toast.makeText(activity, "Для видеокружка нужны камера и микрофон", Toast.LENGTH_SHORT).show()
+            REQUEST_VOICE_MESSAGE -> {
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                    Toast.makeText(activity, "Удерживайте микрофон ещё раз для записи", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(activity, "Для голосового сообщения нужен доступ к микрофону", Toast.LENGTH_SHORT).show()
+                }
+            }
+            REQUEST_ROUND_VIDEO -> {
+                if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                    if (pendingRoundVideoFromGesture) {
+                        Toast.makeText(activity, "Режим видеосообщения: удерживайте кнопку камеры", Toast.LENGTH_SHORT).show()
+                    } else {
+                        requestRoundVideo(activity, gestureControlled = false)
+                    }
+                } else {
+                    Toast.makeText(activity, "Для видеосообщения нужны камера и микрофон", Toast.LENGTH_SHORT).show()
+                }
+                pendingRoundVideoFromGesture = false
             }
         }
     }
@@ -377,9 +413,7 @@ class SteamChatFragment(
         bar.setBackgroundColor(SteamPalette.inputBarBackground)
         bar.setPadding(dp(6f), dp(6f), dp(6f), dp(6f))
 
-        val attachButton = iconButton(context, R.drawable.msg_input_attach2) {
-            Toast.makeText(context, "Отправка файлов пока в разработке", Toast.LENGTH_SHORT).show()
-        }
+        attachButton = iconButton(context, R.drawable.msg_input_attach2) { showAttachMenu(context) }
         bar.addView(attachButton, LinearLayout.LayoutParams(dp(40f), dp(40f)))
 
         val pill = FrameLayout(context)
@@ -409,7 +443,35 @@ class SteamChatFragment(
             },
         )
 
-        val emojiButton = iconButton(context, R.drawable.msg_emoji_smiles) {
+        recordingRow = LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(14f), 0, dp(10f), 0)
+        }
+        recordingDot = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(RECORDING_RED)
+            }
+        }
+        recordingTimer = TextView(context).apply {
+            text = "0:00"
+            textSize = 15f
+            setTextColor(SteamPalette.inputText)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        recordingHint = TextView(context).apply {
+            text = "← Смахните для отмены"
+            textSize = 13f
+            setTextColor(SteamPalette.inputHint)
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }
+        recordingRow.addView(recordingDot, LinearLayout.LayoutParams(dp(8f), dp(8f)).apply { rightMargin = dp(8f) })
+        recordingRow.addView(recordingTimer, LinearLayout.LayoutParams(dp(48f), ViewGroup.LayoutParams.WRAP_CONTENT))
+        recordingRow.addView(recordingHint, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        pill.addView(recordingRow, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40f), Gravity.CENTER_VERTICAL))
+
+        emojiButton = iconButton(context, R.drawable.msg_emoji_smiles) {
             // showEmoticonPicker's callback already hands back the fully-formatted insertable
             // text (":name: " for an emoticon, "/Sticker name " for a sticker - two different
             // shapes, decided inside the picker) - insert as-is, don't reformat it here.
@@ -430,14 +492,11 @@ class SteamChatFragment(
         )
 
         sendButton = ImageView(context)
-        sendButton.setImageResource(R.drawable.msg_send)
         sendButton.colorFilter = PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
         sendButton.scaleType = ImageView.ScaleType.CENTER
         sendButton.setOnClickListener {
             val text = input.text.toString().trim()
-            if (text.isEmpty()) {
-                startVideoNote(context)
-            } else {
+            if (text.isNotEmpty()) {
                 input.setText("")
                 scope.launch {
                     try {
@@ -455,6 +514,63 @@ class SteamChatFragment(
                 }
             }
         }
+        sendButton.setOnTouchListener { _, event ->
+            if (input.text.isNotBlank() || mediaUploadInProgress) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    recordGestureArmed = true
+                    recordGestureStarted = false
+                    recordGestureCancelled = false
+                    recordGestureDownX = event.rawX
+                    startRecordingRunnable = Runnable {
+                        if (!recordGestureArmed) return@Runnable
+                        recordGestureStarted = true
+                        if (recordingMode == RecordingMode.VOICE) {
+                            startVoiceRecording(context)
+                        } else {
+                            requestRoundVideo(context, gestureControlled = true)
+                        }
+                    }.also { sendButton.postDelayed(it, RECORD_HOLD_MS) }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    cancelPendingRecordingStart()
+                    if (recordGestureCancelled) {
+                        // The move event already cancelled and cleaned up the recorder.
+                    } else if (recordGestureStarted) {
+                        finishSelectedRecording(send = true)
+                    } else {
+                        toggleRecordingMode()
+                    }
+                    recordGestureStarted = false
+                    recordGestureCancelled = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    cancelPendingRecordingStart()
+                    if (recordGestureStarted) finishSelectedRecording(send = false)
+                    recordGestureStarted = false
+                    recordGestureCancelled = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val cancelDistance = (fragmentView.width * 0.35f)
+                        .coerceAtMost(dp(140f).toFloat())
+                        .coerceAtLeast(dp(72f).toFloat())
+                    val progress = (1f + (event.rawX - recordGestureDownX) / cancelDistance).coerceIn(0f, 1f)
+                    if (voiceRecorder != null) recordingHint.alpha = progress
+                    if (recordGestureStarted && progress <= 0f) {
+                        cancelPendingRecordingStart()
+                        finishSelectedRecording(send = false)
+                        recordGestureStarted = false
+                        recordGestureCancelled = true
+                        Toast.makeText(context, "Запись отменена", Toast.LENGTH_SHORT).show()
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
         bar.addView(sendButton, LinearLayout.LayoutParams(dp(40f), dp(40f)).apply { bottomMargin = dp(2f) })
 
         input.addTextChangedListener(object : TextWatcher {
@@ -467,147 +583,112 @@ class SteamChatFragment(
         return bar
     }
 
-    /** Text shows Send; an empty personal chat shows the video-note recorder without reflowing the bar. */
+    /** Send is only live when there's something to send - dimmed rather than hidden, so the bar doesn't reflow. */
     private fun updateSendButton() {
         val hasText = input.text.toString().isNotBlank()
-        val canRecordVideo = groupId == null
-        sendButton.setImageResource(if (hasText) R.drawable.msg_send else R.drawable.input_video)
-        sendButton.contentDescription = if (hasText) "Отправить" else "Записать видеокружок"
-        sendButton.isEnabled = hasText || canRecordVideo
-        sendButton.alpha = if (hasText || canRecordVideo) 1f else 0.55f
+        val emptyIcon = if (recordingMode == RecordingMode.VOICE) R.drawable.input_mic else R.drawable.input_video
+        sendButton.setImageResource(if (hasText) R.drawable.msg_send else emptyIcon)
+        sendButton.contentDescription = when {
+            hasText -> "Отправить сообщение"
+            recordingMode == RecordingMode.VOICE -> "Голосовое: удерживайте для записи, коснитесь для режима видеосообщения"
+            else -> "Видеосообщение: удерживайте для записи, коснитесь для режима голосового"
+        }
+        sendButton.isEnabled = !mediaUploadInProgress
+        sendButton.alpha = if (mediaUploadInProgress) 0.45f else 1f
         sendButton.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(if (hasText || canRecordVideo) SteamPalette.accent else SteamPalette.accentDisabled)
+            setColor(if (voiceRecorder != null || roundVideoRecorder != null) RECORDING_RED else SteamPalette.accent)
         }
     }
 
-    private fun startVideoNote(context: Context) {
-        if (groupId != null) {
-            Toast.makeText(context, "Видеокружки пока доступны только в личном чате", Toast.LENGTH_SHORT).show()
-            return
+    private fun toggleRecordingMode() {
+        recordingMode = if (recordingMode == RecordingMode.VOICE) RecordingMode.ROUND_VIDEO else RecordingMode.VOICE
+        if (animationsEnabled()) {
+            sendButton.animate().cancel()
+            sendButton.scaleX = 0.72f
+            sendButton.scaleY = 0.72f
+            sendButton.animate().scaleX(1f).scaleY(1f).setDuration(150L).start()
         }
-        if (Build.VERSION.SDK_INT >= 23) {
-            val missing = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-                .filter { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-            if (missing.isNotEmpty()) {
-                getParentActivity()?.requestPermissions(missing.toTypedArray(), REQUEST_VIDEO_NOTE)
-                return
-            }
+        updateSendButton()
+        val label = if (recordingMode == RecordingMode.VOICE) "Голосовое" else "Видеосообщение"
+        Toast.makeText(sendButton.context, "$label: удерживайте кнопку для записи", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun cancelPendingRecordingStart() {
+        recordGestureArmed = false
+        startRecordingRunnable?.let(sendButton::removeCallbacks)
+        startRecordingRunnable = null
+    }
+
+    private fun finishSelectedRecording(send: Boolean) {
+        if (voiceRecorder != null) {
+            finishVoiceRecording(send)
+        } else if (roundVideoRecorder != null) {
+            finishRoundVideoRecording(send)
         }
-        val cameras = CameraController.getInstance()
-        if (cameras.isCameraInitied()) {
-            showVideoRecorder(context)
+    }
+
+    private fun showVoiceRecordingFeedback() {
+        input.visibility = View.INVISIBLE
+        emojiButton.visibility = View.GONE
+        attachButton.visibility = View.INVISIBLE
+        recordingRow.visibility = View.VISIBLE
+        recordingHint.alpha = 1f
+        recordingHint.text = "← Смахните для отмены"
+        recordingRow.animate().cancel()
+        if (animationsEnabled()) {
+            recordingRow.alpha = 0f
+            recordingRow.translationX = dp(12f).toFloat()
+            recordingRow.animate().alpha(1f).translationX(0f).setDuration(150L).start()
         } else {
-            cameras.initCamera { AndroidUtilities.runOnUIThread { showVideoRecorder(context) } }
+            recordingRow.alpha = 1f
+            recordingRow.translationX = 0f
+        }
+        startRecordingFeedback(recordingDot, recordingTimer) {
+            (System.currentTimeMillis() - voiceStartedAt).coerceAtLeast(0L)
         }
     }
 
-    private fun showVideoRecorder(context: Context) {
-        if (recordingOverlay != null || !::rootContainer.isInitialized) return
+    private fun hideVoiceRecordingFeedback() {
+        stopRecordingFeedback()
+        recordingRow.visibility = View.GONE
+        recordingHint.alpha = 1f
+        input.visibility = View.VISIBLE
+        emojiButton.visibility = View.VISIBLE
+        attachButton.visibility = View.VISIBLE
+    }
 
-        val overlay = FrameLayout(context).apply {
-            setBackgroundColor(0xD9000000.toInt())
-            alpha = 0f
-        }
-        recordingOverlay = overlay
-        rootContainer.addView(overlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-
-        val recorder = RoundVideoRecorder(context)
-            .onDone { file, _, duration -> finishVideoNote(context, file, duration) }
-            .onDestroy { dismissVideoRecorder() }
-        videoRecorder = recorder
-        overlay.addView(recorder, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-
-        val controls = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(24f), dp(12f), dp(24f), dp(24f))
-        }
-        overlay.addView(controls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
-
-        val cancel = TextView(context).apply {
-            text = "Отмена"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
-            setOnClickListener { videoRecorder?.cancel() }
-        }
-        controls.addView(cancel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val timer = TextView(context).apply {
-            text = "0:00.0"
-            textSize = 18f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-        }
-        controls.addView(timer, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val stop = FrameLayout(context).apply {
-            contentDescription = "Остановить запись"
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.WHITE)
+    private fun startRecordingFeedback(dot: View, timer: TextView, elapsed: () -> Long) {
+        stopRecordingFeedback()
+        activeRecordingDot = dot
+        if (animationsEnabled()) {
+            recordingPulse = ObjectAnimator.ofFloat(dot, View.ALPHA, 1f, 0.3f, 1f).apply {
+                duration = 900L
+                repeatCount = ValueAnimator.INFINITE
+                start()
             }
-            setPadding(dp(7f), dp(7f), dp(7f), dp(7f))
-            setOnClickListener { videoRecorder?.stop() }
         }
-        stop.addView(View(context).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(5f).toFloat()
-                setColor(0xFFFF3B30.toInt())
-            }
-        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        controls.addView(stop, LinearLayout.LayoutParams(dp(54f), dp(54f)).apply { leftMargin = dp(24f) })
-
-        val timerTick = object : Runnable {
+        val update = object : Runnable {
             override fun run() {
-                if (recordingOverlay !== overlay) return
-                timer.text = videoRecorder?.sinceRecordingText() ?: "0:00.0"
-                recordingHandler.postDelayed(this, 100)
+                timer.text = formatRecordingTime(elapsed())
+                recordingTimerRunnable = this
+                sendButton.postDelayed(this, 100L)
             }
         }
-        recordingHandler.post(timerTick)
-
-        recordingPulse = ValueAnimator.ofFloat(1f, 0.84f, 1f).apply {
-            duration = 1_000
-            repeatCount = ValueAnimator.INFINITE
-            addUpdateListener {
-                val scale = it.animatedValue as Float
-                stop.scaleX = scale
-                stop.scaleY = scale
-            }
-            start()
-        }
-        overlay.animate().alpha(1f).setDuration(220).start()
+        recordingTimerRunnable = update
+        sendButton.post(update)
     }
 
-    private fun finishVideoNote(context: Context, file: java.io.File, durationMs: Long) {
-        dismissVideoRecorder()
-        scope.launch {
-            try {
-                val senderId = service.observeCurrentUser().value?.steamId64 ?: 0L
-                val message = SteamVideoNoteStore.save(context, friendSteamId64, senderId, file, durationMs)
-                messages = (messages + message).sortedBy { it.timestamp }
-                updateRows()
-                Toast.makeText(context, "Сохранено на этом устройстве: Steam не передаёт видео в чате", Toast.LENGTH_LONG).show()
-            } catch (_: Exception) {
-                Toast.makeText(context, "Не удалось сохранить видеокружок", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun dismissVideoRecorder() {
+    private fun stopRecordingFeedback() {
         recordingPulse?.cancel()
         recordingPulse = null
-        recordingHandler.removeCallbacksAndMessages(null)
-        val overlay = recordingOverlay ?: return
-        recordingOverlay = null
-        videoRecorder = null
-        overlay.animate().alpha(0f).setDuration(180).withEndAction {
-            (overlay.parent as? ViewGroup)?.removeView(overlay)
-        }.start()
+        activeRecordingDot?.alpha = 1f
+        activeRecordingDot = null
+        recordingTimerRunnable?.let(sendButton::removeCallbacks)
+        recordingTimerRunnable = null
     }
+
+    private fun animationsEnabled(): Boolean = Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled()
 
     private fun iconButton(context: Context, iconRes: Int, onClick: () -> Unit): ImageView {
         val icon = ImageView(context)
@@ -620,14 +701,303 @@ class SteamChatFragment(
         return icon
     }
 
+    private fun showAttachMenu(context: Context) {
+        if (mediaUploadInProgress) return
+        val actions = arrayOf("Записать видеосообщение", "Выбрать MP4")
+        AlertDialog.Builder(context).setItems(actions) { _, which ->
+            if (which == 0) requestRoundVideo(context) else pickMp4()
+        }.show()
+    }
+
+    private fun pickMp4() {
+        val activity = getParentActivity() ?: return
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/mp4"
+        }
+        activity.startActivityForResult(intent, REQUEST_PICK_MP4)
+    }
+
+    override fun onActivityResultFragment(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != REQUEST_PICK_MP4 || resultCode != Activity.RESULT_OK) return
+        val context = getParentActivity() ?: return
+        val uri = data?.data ?: return
+        scope.launch {
+            val file = try {
+                withContext(Dispatchers.IO) { copyMp4ToCache(context, uri) }
+            } catch (_: Exception) {
+                Toast.makeText(context, "Не удалось прочитать MP4 или файл больше 30 МБ", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            uploadMedia(file)
+        }
+    }
+
+    private fun copyMp4ToCache(context: Context, uri: Uri): File {
+        val target = File.createTempFile("steamchat_video_", ".mp4", context.cacheDir)
+        try {
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var total = 0L
+                    while (true) {
+                        val read = inputStream.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        check(total <= MAX_MEDIA_BYTES) { "MP4 is too large" }
+                        output.write(buffer, 0, read)
+                    }
+                }
+            } ?: error("Unable to open MP4")
+            check(target.length() > 0L) { "MP4 is empty" }
+            return target
+        } catch (e: Exception) {
+            target.delete()
+            throw e
+        }
+    }
+
+    private fun startVoiceRecording(context: Context) {
+        if (voiceRecorder != null || mediaUploadInProgress) return
+        if (Build.VERSION.SDK_INT >= 23 && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            getParentActivity()?.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_VOICE_MESSAGE)
+            return
+        }
+        val file = File.createTempFile("steamchat_voice_", ".mp4", context.cacheDir)
+        val recorder = MediaRecorder()
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioChannels(1)
+            recorder.setAudioSamplingRate(44_100)
+            recorder.setAudioEncodingBitRate(64_000)
+            recorder.setMaxDuration(MAX_RECORDING_MS.toInt())
+            recorder.setOutputFile(file.absolutePath)
+            recorder.setOnInfoListener { _, what, _ ->
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                    sendButton.post { finishVoiceRecording(send = true) }
+                }
+            }
+            recorder.prepare()
+            recorder.start()
+            voiceRecorder = recorder
+            voiceFile = file
+            voiceStartedAt = System.currentTimeMillis()
+            showVoiceRecordingFeedback()
+            updateSendButton()
+        } catch (_: Exception) {
+            recorder.release()
+            file.delete()
+            Toast.makeText(context, "Не удалось начать запись", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun finishVoiceRecording(send: Boolean) {
+        val recorder = voiceRecorder ?: return
+        val file = voiceFile
+        val duration = System.currentTimeMillis() - voiceStartedAt
+        voiceRecorder = null
+        voiceFile = null
+        var valid = send && duration >= MIN_VOICE_MS
+        try {
+            recorder.stop()
+        } catch (_: RuntimeException) {
+            valid = false
+        } finally {
+            recorder.release()
+        }
+        hideVoiceRecordingFeedback()
+        input.hint = chatInputHint()
+        updateSendButton()
+        if (valid && file != null) {
+            uploadMedia(file)
+        } else {
+            file?.delete()
+            if (send && duration < MIN_VOICE_MS) {
+                getParentActivity()?.let { Toast.makeText(it, "Голосовое слишком короткое", Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
+
+    private fun requestRoundVideo(context: Context, gestureControlled: Boolean = false) {
+        if (Build.VERSION.SDK_INT >= 23) {
+            val missing = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+                .filter { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (missing.isNotEmpty()) {
+                pendingRoundVideoFromGesture = gestureControlled
+                getParentActivity()?.requestPermissions(missing.toTypedArray(), REQUEST_ROUND_VIDEO)
+                return
+            }
+        }
+        val cameras = CameraController.getInstance()
+        if (cameras.isCameraInitied) {
+            showRoundVideoRecorder(context, gestureControlled)
+        } else {
+            cameras.initCamera { AndroidUtilities.runOnUIThread { showRoundVideoRecorder(context, gestureControlled) } }
+        }
+    }
+
+    private fun showRoundVideoRecorder(context: Context, gestureControlled: Boolean) {
+        if (isFinished || isFinishing || roundVideoRecorder != null || mediaUploadInProgress) return
+        val root = fragmentView as? FrameLayout ?: return
+        val overlay = FrameLayout(context).apply { setBackgroundColor(0xcc000000.toInt()) }
+        val recorder = object : RoundVideoRecorder(context) {
+            override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+                val side = cameraView.measuredWidth
+                val x = (right - left - side) / 2
+                val y = (bottom - top - side) / 2 - dp(24f)
+                cameraView.layout(x, y, x + side, y + side)
+            }
+        }
+        roundVideoRecorder = recorder
+        recordingOverlay = overlay
+        recorder.onDone { file, _, _ ->
+            clearRoundVideoRecorder(root, overlay)
+            uploadMedia(file)
+        }
+        recorder.onDestroy { clearRoundVideoRecorder(root, overlay) }
+        overlay.addView(recorder, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val status = LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20f).toFloat()
+                setColor(0xCC16202D.toInt())
+            }
+            setPadding(dp(14f), dp(9f), dp(14f), dp(9f))
+        }
+        val circleDot = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(RECORDING_RED)
+            }
+        }
+        val circleTimer = TextView(context).apply {
+            text = "0:00"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val circleHint = TextView(context).apply {
+            text = if (gestureControlled) "Видеосообщение · отпустите для отправки" else "Идёт запись видеосообщения"
+            textSize = 14f
+            setTextColor(SteamPalette.headerSubtitle)
+        }
+        status.addView(circleDot, LinearLayout.LayoutParams(dp(9f), dp(9f)).apply { rightMargin = dp(8f) })
+        status.addView(circleTimer, LinearLayout.LayoutParams(dp(48f), ViewGroup.LayoutParams.WRAP_CONTENT))
+        status.addView(circleHint)
+        overlay.addView(status, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(28f)
+        })
+        if (animationsEnabled()) {
+            status.alpha = 0f
+            status.translationY = -dp(12f).toFloat()
+            status.animate().alpha(1f).translationY(0f).setDuration(180L).start()
+        }
+        startRecordingFeedback(circleDot, circleTimer) { recorder.sinceRecording() }
+
+        val controls = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val cancel = TextView(context).apply {
+            text = "Отмена"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(20f), dp(12f), dp(20f), dp(12f))
+            setOnClickListener {
+                recorder.cancel()
+            }
+        }
+        val done = TextView(context).apply {
+            text = "Отправить"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(20f), dp(12f), dp(20f), dp(12f))
+            setOnClickListener { recorder.stop() }
+        }
+        controls.addView(cancel)
+        controls.addView(ImageView(context).apply {
+            setImageResource(R.drawable.camera_revert1)
+            colorFilter = PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
+            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+            contentDescription = "Сменить камеру"
+            setOnClickListener { recorder.cameraView.switchCamera() }
+        }, LinearLayout.LayoutParams(dp(48f), dp(48f)))
+        controls.addView(done)
+        overlay.addView(controls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(32f)
+        })
+        root.addView(overlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        updateSendButton()
+    }
+
+    private fun finishRoundVideoRecording(send: Boolean) {
+        val recorder = roundVideoRecorder ?: return
+        if (send) recorder.stop() else recorder.cancel()
+    }
+
+    private fun clearRoundVideoRecorder(root: FrameLayout, overlay: View) {
+        if (recordingOverlay !== overlay) return
+        stopRecordingFeedback()
+        roundVideoRecorder = null
+        recordingOverlay = null
+        root.removeView(overlay)
+        updateSendButton()
+    }
+
+    private fun uploadMedia(file: File) {
+        val context = getParentActivity()
+        if (context == null) {
+            file.delete()
+            return
+        }
+        if (mediaUploadInProgress) {
+            file.delete()
+            return
+        }
+        mediaUploadInProgress = true
+        updateSendButton()
+        input.hint = "Отправка MP4…"
+        scope.launch {
+            try {
+                val selectedGroupId = groupId
+                val channelId = activeGroupChannelId
+                if (selectedGroupId != null) {
+                    service.sendGroupMedia(selectedGroupId, checkNotNull(channelId) { "Group channel is unavailable" }, file.absolutePath)
+                } else {
+                    service.sendMedia(friendSteamId64, file.absolutePath)
+                }
+                Toast.makeText(context, "Медиа отправлено", Toast.LENGTH_SHORT).show()
+            } catch (_: Exception) {
+                Toast.makeText(context, "Не удалось отправить MP4", Toast.LENGTH_SHORT).show()
+            } finally {
+                file.delete()
+                mediaUploadInProgress = false
+                input.hint = chatInputHint()
+                updateSendButton()
+            }
+        }
+    }
+
+    private fun chatInputHint(): String {
+        if (groupId == null) return "Сообщение"
+        val channel = activeGroupChannelId?.let { channelId ->
+            currentGroup?.channels?.firstOrNull { it.id == channelId }
+        }
+        return "Сообщение в #${channel?.name?.ifBlank { "канал" } ?: "канал"}"
+    }
+
     /** Long-press actions. Plain platform dialog, same choice the profile screen's name-history popup makes. */
     private fun showMessageMenu(context: Context, messageText: String, content: SteamMessageContent) {
-        if (content is SteamMessageContent.LocalVideoNote) return
         val url = when (content) {
             is SteamMessageContent.Image -> content.url
+            is SteamMessageContent.Media -> content.url
             is SteamMessageContent.Link -> content.url
             is SteamMessageContent.Text -> null
-            is SteamMessageContent.LocalVideoNote -> null
         }
         val actions = buildList {
             add("Копировать текст" to { copyToClipboard(context, messageText) })
@@ -660,20 +1030,29 @@ class SteamChatFragment(
         context.startActivity(Intent.createChooser(intent, "Поделиться"))
     }
 
-    override fun onBackPressed(invoked: Boolean): Boolean {
-        if (videoRecorder == null) return super.onBackPressed(invoked)
-        if (invoked) videoRecorder?.cancel()
-        return false
-    }
-
     override fun onPause() {
-        videoRecorder?.cancel()
+        cancelPendingRecordingStart()
+        recordGestureStarted = false
+        recordGestureCancelled = false
+        finishVoiceRecording(send = false)
+        roundVideoRecorder?.cancel()
+        roundVideoRecorder = null
+        (recordingOverlay?.parent as? ViewGroup)?.removeView(recordingOverlay)
+        recordingOverlay = null
+        if (::recyclerView.isInitialized) {
+            for (index in 0 until recyclerView.childCount) {
+                (recyclerView.getChildAt(index) as? SteamMessageCell)?.stopPlayback()
+            }
+        }
         super.onPause()
     }
 
     override fun onFragmentDestroy() {
-        videoRecorder?.cancel()
-        dismissVideoRecorder()
+        cancelPendingRecordingStart()
+        finishVoiceRecording(send = false)
+        roundVideoRecorder?.cancel()
+        roundVideoRecorder = null
+        recordingOverlay = null
         scope.cancel()
         super.onFragmentDestroy()
     }
@@ -718,10 +1097,17 @@ class SteamChatFragment(
             }
         }
 
+        override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+            (holder.itemView as? SteamMessageCell)?.recycle()
+            super.onViewRecycled(holder)
+        }
+
         override fun getItemCount(): Int = if (groupId == null) rows.size else groupRows.size
     }
 
     private class RowViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
+
+    private enum class RecordingMode { VOICE, ROUND_VIDEO }
 
     companion object {
         fun forGroup(groupId: Long, channelId: Long): SteamChatFragment =
@@ -729,9 +1115,21 @@ class SteamChatFragment(
 
         private const val MENU_CALL = 1
         private const val REQUEST_MICROPHONE = 701
-        private const val REQUEST_VIDEO_NOTE = 702
+        private const val REQUEST_VOICE_MESSAGE = 702
+        private const val REQUEST_ROUND_VIDEO = 703
+        private const val REQUEST_PICK_MP4 = 704
         private const val MENU_SEARCH = 2
         private const val MENU_MORE = 3
+        private const val MAX_MEDIA_BYTES = 30L * 1024 * 1024
+        private const val MAX_RECORDING_MS = 59_500L
+        private const val MIN_VOICE_MS = 600L
+        private const val RECORD_HOLD_MS = 150L
+        private const val RECORDING_RED = 0xffe65757.toInt()
+
+        private fun formatRecordingTime(milliseconds: Long): String {
+            val seconds = (milliseconds.coerceAtLeast(0L) / 1_000L).toInt()
+            return "%d:%02d".format(Locale.US, seconds / 60, seconds % 60)
+        }
 
         /** Same 52dp back-button clearance real ChatActivity gives its own avatarContainer. */
         private const val HEADER_LEFT_DP = 52f

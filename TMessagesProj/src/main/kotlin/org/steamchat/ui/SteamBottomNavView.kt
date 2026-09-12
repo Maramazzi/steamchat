@@ -91,7 +91,7 @@ internal class SteamBottomNavView(context: Context) : LinearLayout(context) {
     private fun applySelection() {
         tabViews.forEach { (tab, views) ->
             val (icon, label, _) = views
-            val color = if (tab == selected) SteamPalette.accent else SteamPalette.headerSubtitle
+            val color = if (tab == selected) SteamPalette.authorAccent else SteamPalette.headerSubtitle
             icon.colorFilter = PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
             label.setTextColor(color)
         }

@@ -194,6 +194,10 @@ class FakeSteamService : SteamService {
         incomingMessages.value = message
     }
 
+    override suspend fun sendMedia(friendSteamId64: Long, filePath: String) {
+        sendMessage(friendSteamId64, "https://steamusercontent-a.akamaihd.net/ugc/fake/steamchat.mp4")
+    }
+
     override suspend fun markAsRead(friendSteamId64: Long) {
         unreadCounts[friendSteamId64] = 0
         dialogsFlow.value = buildDialogs()
@@ -205,6 +209,8 @@ class FakeSteamService : SteamService {
     override suspend fun loadOlderGroupMessages(groupId: Long, channelId: Long): Boolean = false
 
     override suspend fun sendGroupMessage(groupId: Long, channelId: Long, text: String) = Unit
+
+    override suspend fun sendGroupMedia(groupId: Long, channelId: Long, filePath: String) = Unit
 
     override suspend fun markGroupChannelRead(groupId: Long, channelId: Long) = Unit
 

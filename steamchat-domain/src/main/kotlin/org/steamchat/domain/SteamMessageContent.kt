@@ -18,19 +18,33 @@ sealed interface SteamMessageContent {
     /** A Steam-hosted image the cell can load and show inline. [sourceLabel] captions the card. */
     data class Image(val url: String, val sourceLabel: String) : SteamMessageContent
 
+    /** A Steam chat upload whose extension is hidden by the UGC CDN (voice note or video). */
+    data class Media(val url: String) : SteamMessageContent
+
     /** A link worth labelling but not previewing as a picture. [sourceLabel] is null for non-Steam hosts. */
     data class Link(val url: String, val sourceLabel: String?) : SteamMessageContent
-
-    /** A video note recorded by this client and kept on this device. */
-    data class LocalVideoNote(val path: String, val durationMs: Long) : SteamMessageContent
 }
 
-private const val LOCAL_VIDEO_NOTE_PREFIX = "steamchat-video-note|"
+enum class SteamMediaKind { IMAGE, VOICE, ROUND_VIDEO, UNKNOWN }
+
+/** Steam labels both voice notes and round videos as video/mp4, so tracks win over MIME. */
+fun classifySteamMedia(contentType: String?, hasVideo: Boolean, hasAudio: Boolean): SteamMediaKind = when {
+    contentType?.startsWith("image/") == true -> SteamMediaKind.IMAGE
+    hasVideo -> SteamMediaKind.ROUND_VIDEO
+    hasAudio -> SteamMediaKind.VOICE
+    contentType?.startsWith("audio/") == true -> SteamMediaKind.VOICE
+    else -> SteamMediaKind.UNKNOWN
+}
+
 private val URL_PATTERN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
 // Steam serves user-uploaded chat images/screenshots from these hosts. Checked as a host suffix,
 // not a substring of the whole URL, so "evil.com/?x=steamusercontent.com" can't pose as Steam.
 private val IMAGE_HOSTS = listOf("steamusercontent.com", "steamuserimages-a.akamaihd.net")
+
+// Chat uploads currently land on cdn.steamusercontent.com; older ones used the Akamai host.
+// The CDN host also matches IMAGE_HOSTS, so this check must run first and inspect the container.
+private val MEDIA_HOSTS = listOf("cdn.steamusercontent.com", "steamusercontent-a.akamaihd.net")
 
 private val LABELLED_HOSTS = mapOf(
     "steamcommunity.com" to "Steam Community",
@@ -47,19 +61,11 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
     val trimmed = text.trim()
     if (trimmed.isEmpty()) return SteamMessageContent.Text(text)
 
-    if (trimmed.startsWith(LOCAL_VIDEO_NOTE_PREFIX)) {
-        val parts = trimmed.split('|', limit = 3)
-        val durationMs = parts.getOrNull(1)?.toLongOrNull()
-        val path = parts.getOrNull(2)
-        if (durationMs != null && durationMs > 0 && !path.isNullOrBlank()) {
-            return SteamMessageContent.LocalVideoNote(path, durationMs)
-        }
-    }
-
     val match = URL_PATTERN.matchEntire(trimmed) ?: return SteamMessageContent.Text(text)
     val url = match.value
     val host = hostOf(url) ?: return SteamMessageContent.Text(text)
 
+    if (MEDIA_HOSTS.any { host.hostMatches(it) }) return SteamMessageContent.Media(url)
     IMAGE_HOSTS.firstOrNull { host.hostMatches(it) }?.let {
         return SteamMessageContent.Image(url, "Steam Community")
     }
@@ -67,12 +73,6 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
         return SteamMessageContent.Link(url, it.value)
     }
     return SteamMessageContent.Link(url, null)
-}
-
-fun localVideoNoteMessageText(path: String, durationMs: Long): String {
-    require(path.isNotBlank() && '|' !in path) { "Invalid local video-note path" }
-    require(durationMs > 0) { "Video-note duration must be positive" }
-    return "$LOCAL_VIDEO_NOTE_PREFIX$durationMs|$path"
 }
 
 /** Exact host or a subdomain of it - never a mere substring (see IMAGE_HOSTS). */

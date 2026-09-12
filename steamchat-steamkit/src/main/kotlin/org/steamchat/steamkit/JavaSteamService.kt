@@ -462,7 +462,7 @@ class JavaSteamService internal constructor(
             CFriendMessages_IncomingMessage_Notification.Builder::class.java,
         ) { cb ->
             val body = cb.body.build()
-            val text = body.message
+            val text = body.messageNoBbcode.takeIf { it.isNotBlank() } ?: body.message
             if (body.chatEntryType == EChatEntryType.ChatMsg.code() && !text.isNullOrEmpty()) {
                 val friendId = body.steamidFriend
                 // localEcho means we sent it ourselves from another session (the desktop client),
@@ -595,14 +595,8 @@ class JavaSteamService internal constructor(
     }
 
     private suspend fun fetchWebLogonToken(): WebRtcWebLogon = withContext(Dispatchers.IO) {
-        val client = checkNotNull(activeSteamClient) { "Steam session is unavailable" }
+        val webSession = createSteamCommunityWebSession()
         val steamId = checkNotNull(_currentUser.value?.steamId64) { "Steam account is unavailable" }
-        val refreshToken = checkNotNull(cachedLogOnDetails?.accessToken) { "Steam refresh token is unavailable" }
-        val accessToken = client.authentication
-            .generateAccessTokenForApp(SteamID(steamId), refreshToken)
-            .await().accessToken
-        val sessionId = UUID.randomUUID().toString().replace("-", "")
-        val loginCookie = URLEncoder.encode("$steamId||$accessToken", StandardCharsets.UTF_8.name())
         val connection = URI("https://steamcommunity.com/chat/clientjstoken").toURL().openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
@@ -611,7 +605,7 @@ class JavaSteamService internal constructor(
             connection.readTimeout = 15_000
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("User-Agent", "Valve Steam Client")
-            connection.setRequestProperty("Cookie", "sessionid=$sessionId; steamLoginSecure=$loginCookie")
+            connection.setRequestProperty("Cookie", webSession.cookieHeader)
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(0)
             connection.outputStream.close()
@@ -630,6 +624,21 @@ class JavaSteamService internal constructor(
         } finally {
             connection.disconnect()
         }
+    }
+
+    private suspend fun createSteamCommunityWebSession(): SteamCommunityWebSession {
+        val client = checkNotNull(activeSteamClient) { "Steam session is unavailable" }
+        val steamId = checkNotNull(_currentUser.value?.steamId64) { "Steam account is unavailable" }
+        val refreshToken = checkNotNull(cachedLogOnDetails?.accessToken) { "Steam refresh token is unavailable" }
+        val accessToken = client.authentication
+            .generateAccessTokenForApp(SteamID(steamId), refreshToken)
+            .await().accessToken
+        val sessionId = UUID.randomUUID().toString().replace("-", "")
+        val loginCookie = URLEncoder.encode("$steamId||$accessToken", StandardCharsets.UTF_8.name())
+        return SteamCommunityWebSession(
+            sessionId = sessionId,
+            cookieHeader = "sessionid=$sessionId; steamLoginSecure=$loginCookie",
+        )
     }
 
     override fun observeDialogs(): StateFlow<List<SteamDialog>> = _dialogs
@@ -887,6 +896,10 @@ class JavaSteamService internal constructor(
         incomingMessages.tryEmit(message)
     }
 
+    override suspend fun sendMedia(friendSteamId64: Long, filePath: String) = withContext(Dispatchers.IO) {
+        SteamChatMediaUploader.uploadToFriend(createSteamCommunityWebSession(), friendSteamId64, filePath)
+    }
+
     override suspend fun markAsRead(friendSteamId64: Long) {
         unreadCounts[friendSteamId64] = 0
         rebuildDialogs()
@@ -974,6 +987,11 @@ class JavaSteamService internal constructor(
         mergeGroupMessages(GroupChannelKey(groupId, channelId), listOf(sent))
         updateGroupChannelActivity(sent, unread = false)
     }
+
+    override suspend fun sendGroupMedia(groupId: Long, channelId: Long, filePath: String) =
+        withContext(Dispatchers.IO) {
+            SteamChatMediaUploader.uploadToGroup(createSteamCommunityWebSession(), groupId, channelId, filePath)
+        }
 
     override suspend fun markGroupChannelRead(groupId: Long, channelId: Long) {
         val service = chatRoomService ?: return

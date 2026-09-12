@@ -28,7 +28,7 @@ internal fun dialogPreviewText(text: String?): String {
     if (text.isNullOrEmpty()) return ""
     return when (parseSteamMessageContent(text)) {
         is SteamMessageContent.Image -> "Фото"
-        is SteamMessageContent.LocalVideoNote -> "Видеосообщение"
+        is SteamMessageContent.Media -> "Медиа"
         else -> text
     }
 }
