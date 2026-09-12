@@ -111,6 +111,8 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
                 outline.setRoundRect(0, 0, view.width, view.height, dp(VIDEO_CORNER_DP).toFloat())
         }
         mediaVideo.clipToOutline = true
+        mediaThumbnail.outlineProvider = mediaVideo.outlineProvider
+        mediaThumbnail.clipToOutline = true
         mediaVideo.visibility = View.GONE
         mediaContainer.addView(mediaVideo, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
         mediaProgress.visibility = View.GONE

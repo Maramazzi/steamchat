@@ -1,84 +1,55 @@
 package org.steamchat.ui
 
-import android.graphics.Color
 import android.graphics.drawable.Drawable
 import org.steamchat.domain.SteamStatus
 import org.steamchat.domain.SteamUser
 import org.telegram.ui.ActionBar.Theme
 
-/**
- * TWO SEPARATE COLOR SYSTEMS COEXIST IN org.steamchat.ui ON PURPOSE - this object is one of them.
- * Every screen belongs to exactly one; nothing on a screen should read from the other one.
- *
- * 1. **SteamPalette (this file)** - Steam's own client colours (#1B2838 background / #2A475E
- *    panel / #66C0F4 accent, not invented shades), hardcoded because these screens are meant to
- *    look like Steam, not like Telegram. Screens on this system: [SteamDialogsFragment] (chat
- *    list), [SteamChatFragment] (a chat), [SteamCallFragment] (the call screen), the bottom nav
- *    ([SteamBottomNavView]), [SteamFriendsFragment].
- * 2. **`Theme.getColor(Theme.key_*)`** - real Telegram theming, repaints automatically if the
- *    active theme ever changes. Screens on this system: [SteamProfileFragment] +
- *    [SteamProfileHeaderView], [SteamGamesFragment] + [SteamGameCell], [SteamSettingsFragment],
- *    [SteamGroupChannelsFragment]. A full SteamPalette-style replacement was tried here once
- *    (`SteamColors.kt`) and reverted on request - kept on Theme.getColor() deliberately, not an
- *    oversight.
- *
- * **Building something new:** pick whichever system the screen it lives on already uses - never
- * mix both on one screen. If the screen doesn't exist yet, default to `Theme.getColor()` (that's
- * the rest of the app, and what real Telegram infrastructure like `BaseFragment`/`ActionBar`
- * already assumes); reach for SteamPalette only when the screen is deliberately meant to look
- * like Steam's own client chrome, not Telegram's.
- *
- * **The recurring bug this causes:** a cell built for one system silently keeps working - until
- * its screen is repainted onto the other system, and whatever it hardcoded (or whatever
- * `Theme.getSelectorDrawable(true)` happens to paint) stops matching. It has already happened
- * twice (the profile screen's stat tiles, then [SteamDialogCell] when the chat list moved onto
- * SteamPalette) - see CLAUDE.md section 4. [rowSelector] exists specifically to make the second
- * half of that bug (the selector-drawable footgun) structurally impossible going forward.
- */
+/** Semantic names for SteamChat views, backed by the same theme as profiles and dialogs. */
 internal object SteamPalette {
 
     // ---- Backgrounds --------------------------------------------------------------------------
-    /** Screen background - the deep graphite-blue Steam uses behind its own content. */
-    val chatBackground = Color.parseColor("#16202D")
+    /** Main dark canvas. */
+    val chatBackground get() = Theme.getColor(Theme.key_windowBackgroundGray)
     /** Date pill / dividers - barely there, sitting on the background rather than competing. */
-    val separatorSurface = Color.parseColor("#1E2B3A")
+    val separatorSurface get() = Theme.getColor(Theme.key_chat_inBubble)
 
     // ---- Text & accent --------------------------------------------------------------------------
-    val headerTitle = Color.parseColor("#E6EEF6")
-    val headerSubtitle = Color.parseColor("#8FA6BC")
-    val authorAccent = Color.parseColor("#66C0F4")
-    /** Send button, active tab pills/icons, and the header accent - the one "brand" blue. */
-    val accent = Color.parseColor("#1F6FA8")
-    val accentDisabled = Color.parseColor("#2A3A4B")
+    val headerTitle get() = Theme.getColor(Theme.key_windowBackgroundWhiteBlackText)
+    val headerSubtitle get() = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText)
+    val authorAccent get() = Theme.getColor(Theme.key_windowBackgroundWhiteBlueText)
+    /** Send button, active tabs, and header accent. */
+    val accent get() = Theme.getColor(Theme.key_chats_actionBackground)
+    val accentDisabled get() = Theme.getColor(Theme.key_chats_unreadCounterMuted)
 
     // ---- Chat bubbles ---------------------------------------------------------------------------
-    /** Incoming bubble: Steam's panel colour, a touch lifted off the background. */
-    val incomingBubble = Color.parseColor("#25384D")
-    /** Outgoing bubble: Steam blue, dark enough to keep white text readable. */
-    val outgoingBubble = Color.parseColor("#1F6FA8")
-    val incomingText = Color.parseColor("#DCE7F1")
-    val outgoingText = Color.WHITE
+    /** Incoming cards sit slightly above the canvas. */
+    val incomingBubble get() = Theme.getColor(Theme.key_chat_inBubble)
+    /** Outgoing cards use a lighter graphite surface. */
+    val outgoingBubble get() = Theme.getColor(Theme.key_chat_outBubble)
+    val incomingText get() = Theme.getColor(Theme.key_chat_messageTextIn)
+    val outgoingText get() = Theme.getColor(Theme.key_chat_messageTextOut)
     /** Timestamps/labels inside a bubble: same hue as its text but stepped back. */
-    val incomingMeta = Color.parseColor("#8FA6BC")
-    val outgoingMeta = Color.parseColor("#BBDCF2")
-    val separatorText = Color.parseColor("#8FA6BC")
+    val incomingMeta get() = Theme.getColor(Theme.key_chat_inTimeText)
+    val outgoingMeta get() = Theme.getColor(Theme.key_chat_outTimeText)
+    val separatorText get() = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText)
 
     // ---- Input bar ------------------------------------------------------------------------------
-    val inputBarBackground = Color.parseColor("#131C27")
-    val inputField = Color.parseColor("#22303F")
-    val inputHint = Color.parseColor("#7E93A8")
-    val inputText = Color.parseColor("#E6EEF6")
-    val inputIcon = Color.parseColor("#8FA6BC")
+    val inputBarBackground get() = Theme.getColor(Theme.key_chat_messagePanelBackground)
+    val inputField get() = Theme.getColor(Theme.key_chat_inBubble)
+    val inputHint get() = Theme.getColor(Theme.key_chat_messagePanelHint)
+    val inputText get() = Theme.getColor(Theme.key_chat_messagePanelText)
+    val inputIcon get() = Theme.getColor(Theme.key_chat_messagePanelIcons)
 
     // ---- Call screen ----------------------------------------------------------------------------
-    /** Darker than the chat, so the avatar and the red hangup carry the screen. */
-    val callBackground = Color.parseColor("#0B111B")
-    val callPanel = Color.parseColor("#131C29")
-    val callControl = Color.parseColor("#1E2836")
-    val callHandle = Color.parseColor("#33445A")
-    val callHangup = Color.parseColor("#E5484D")
-    val callRingStart = Color.parseColor("#7A5CFF")
-    val callRingEnd = Color.parseColor("#4AA8FF")
+    /** The avatar and red hangup remain the focus of the call screen. */
+    val callBackground get() = Theme.getColor(Theme.key_windowBackgroundGray)
+    val callPanel get() = Theme.getColor(Theme.key_dialogBackground)
+    val callControl get() = Theme.getColor(Theme.key_chat_inBubble)
+    val callHandle get() = Theme.getColor(Theme.key_divider)
+    val callHangup get() = Theme.getColor(Theme.key_text_RedRegular)
+    val callRingStart get() = Theme.getColor(Theme.key_windowBackgroundWhiteBlueText)
+    val callRingEnd get() = Theme.getColor(Theme.key_chats_actionBackground)
 
     // ---- Presence -------------------------------------------------------------------------------
     /**
@@ -86,23 +57,15 @@ internal object SteamPalette {
      * online, grey when offline - so the dot carries the same meaning it does in the real client
      * rather than being "green = any activity".
      */
-    val presenceInGame = Color.parseColor("#90BA3C")
-    val presenceOnline = Color.parseColor("#57CBDE")
-    val presenceOffline = Color.parseColor("#5C6D7E")
+    val presenceInGame get() = Theme.getColor(Theme.key_windowBackgroundWhiteGreenText)
+    val presenceOnline get() = Theme.getColor(Theme.key_windowBackgroundWhiteBlueText)
+    val presenceOffline get() = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText)
     /** Dialog list's on-avatar online dot: boolean-only (that screen doesn't show in-game nuance,
      *  see CLAUDE.md section "19. НЕ ДУБЛИРОВАТЬ FRIENDS SCREEN") so it always uses the same
      *  Steam-like green as [presenceInGame] rather than the 3-way [presenceColor] split. */
-    val dialogOnlineDot = presenceInGame
+    val dialogOnlineDot get() = Theme.getColor(Theme.key_chats_onlineCircle)
 
-    /**
-     * Row/cell press feedback - call this instead of `Theme.getSelectorDrawable()` directly.
-     * Always transparent at rest: `getSelectorDrawable(true)` paints an opaque
-     * `key_windowBackgroundWhite` fill, a Theme color that only happens to look right when it
-     * matches whatever surface the cell sits on - which silently breaks the moment that screen or
-     * its container is repainted (see the class doc). `false` shows the real surface through
-     * unconditionally and is correct everywhere, on either color system, so there is never a
-     * per-cell judgment call to get wrong again.
-     */
+    /** Transparent ripple preserves the background of cards and rows. */
     fun rowSelector(): Drawable = Theme.getSelectorDrawable(false)
 }
 

@@ -13,6 +13,7 @@ import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.widget.Toast
 import androidx.core.view.ViewCompat
+import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,10 +47,13 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // SteamChat is dark-first by design. Our cells already read every color through
-        // Theme.getColor(), so switching the active theme repaints all of them - no per-view
-        // color overrides needed. "Dark Blue" is Telegram's own dark navy palette.
-        Theme.getTheme(DARK_THEME_NAME)?.let { Theme.applyTheme(it, false, true) }
+        // Install the bundled Somnolent variant before any themed views or paints are created.
+        // getAssetFile only compares file sizes and can reuse an older palette after an update.
+        val themeFile = File(cacheDir, "somnolent_github.attheme")
+        assets.open("somnolent_github.attheme").use { source ->
+            themeFile.outputStream().use { source.copyTo(it) }
+        }
+        Theme.applyThemeFile(themeFile, "Somnolent GitHub", null, false)
 
         // Normally LaunchActivity does this before any dialogs/chat UI exists. We skip
         // LaunchActivity entirely (see class doc), so without this every shared Paint these
@@ -272,7 +276,6 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
     }
 
     private companion object {
-        const val DARK_THEME_NAME = "Dark Blue"
         const val REQUEST_INCOMING_MICROPHONE = 0x531
     }
 }
