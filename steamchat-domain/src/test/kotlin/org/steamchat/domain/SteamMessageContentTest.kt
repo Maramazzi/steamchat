@@ -33,6 +33,13 @@ class SteamMessageContentTest {
     }
 
     @Test
+    fun `the current chat cdn host reaches media inspection instead of image rendering`() {
+        val url = "https://cdn.steamusercontent.com/ugc/12921230442949089530/ABCDEF/"
+
+        assertEquals(SteamMessageContent.Media(url), parseSteamMessageContent(url))
+    }
+
+    @Test
     fun `an audio-only mp4 is a voice message despite its video mime type`() {
         assertEquals(
             SteamMediaKind.VOICE,

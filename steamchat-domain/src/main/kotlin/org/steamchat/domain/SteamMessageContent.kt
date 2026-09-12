@@ -42,9 +42,9 @@ private val URL_PATTERN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 // not a substring of the whole URL, so "evil.com/?x=steamusercontent.com" can't pose as Steam.
 private val IMAGE_HOSTS = listOf("steamusercontent.com", "steamuserimages-a.akamaihd.net")
 
-// Chat MP4 uploads use this distinct CDN host and extensionless /ugc/... URLs. Keep it separate
-// from IMAGE_HOSTS: the cell has to inspect the container before choosing voice/video rendering.
-private const val MEDIA_HOST = "steamusercontent-a.akamaihd.net"
+// Chat uploads currently land on cdn.steamusercontent.com; older ones used the Akamai host.
+// The CDN host also matches IMAGE_HOSTS, so this check must run first and inspect the container.
+private val MEDIA_HOSTS = listOf("cdn.steamusercontent.com", "steamusercontent-a.akamaihd.net")
 
 private val LABELLED_HOSTS = mapOf(
     "steamcommunity.com" to "Steam Community",
@@ -65,7 +65,7 @@ fun parseSteamMessageContent(text: String): SteamMessageContent {
     val url = match.value
     val host = hostOf(url) ?: return SteamMessageContent.Text(text)
 
-    if (host.hostMatches(MEDIA_HOST)) return SteamMessageContent.Media(url)
+    if (MEDIA_HOSTS.any { host.hostMatches(it) }) return SteamMessageContent.Media(url)
     IMAGE_HOSTS.firstOrNull { host.hostMatches(it) }?.let {
         return SteamMessageContent.Image(url, "Steam Community")
     }
