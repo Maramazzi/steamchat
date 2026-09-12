@@ -104,11 +104,11 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         imageView.setRoundRadius(dp(14f))
         bubble.addView(imageView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, IMAGE_HEIGHT_DP))
 
-        mediaThumbnail.setRoundRadius(dp(VIDEO_SIZE_DP / 2f))
+        mediaThumbnail.setRoundRadius(dp(VIDEO_CORNER_DP))
         mediaContainer.addView(mediaThumbnail, LayoutHelper.createFrame(VIDEO_SIZE_DP, VIDEO_SIZE_DP.toFloat()))
         mediaVideo.outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(view: View, outline: Outline) =
-                outline.setOval(0, 0, view.width, view.height)
+                outline.setRoundRect(0, 0, view.width, view.height, dp(VIDEO_CORNER_DP).toFloat())
         }
         mediaVideo.clipToOutline = true
         mediaVideo.visibility = View.GONE
@@ -683,6 +683,7 @@ class SteamMessageCell(context: Context) : FrameLayout(context) {
         const val IMAGE_HEIGHT_DP = 170
         const val IMAGE_SIZE_HINT = "560_400"
         const val VIDEO_SIZE_DP = 180
+        const val VIDEO_CORNER_DP = 24f
         const val AUDIO_PROGRESS_MAX = 1_000
         const val AUDIO_PROGRESS_TICK_MS = 200L
     }

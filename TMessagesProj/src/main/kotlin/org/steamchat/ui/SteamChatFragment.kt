@@ -352,12 +352,12 @@ class SteamChatFragment(
             REQUEST_ROUND_VIDEO -> {
                 if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
                     if (pendingRoundVideoFromGesture) {
-                        Toast.makeText(activity, "Режим кружка: удерживайте кнопку камеры", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(activity, "Режим видеосообщения: удерживайте кнопку камеры", Toast.LENGTH_SHORT).show()
                     } else {
                         requestRoundVideo(activity, gestureControlled = false)
                     }
                 } else {
-                    Toast.makeText(activity, "Для кружка нужны камера и микрофон", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(activity, "Для видеосообщения нужны камера и микрофон", Toast.LENGTH_SHORT).show()
                 }
                 pendingRoundVideoFromGesture = false
             }
@@ -590,8 +590,8 @@ class SteamChatFragment(
         sendButton.setImageResource(if (hasText) R.drawable.msg_send else emptyIcon)
         sendButton.contentDescription = when {
             hasText -> "Отправить сообщение"
-            recordingMode == RecordingMode.VOICE -> "Голосовое: удерживайте для записи, коснитесь для режима кружка"
-            else -> "Кружок: удерживайте для записи, коснитесь для режима голосового"
+            recordingMode == RecordingMode.VOICE -> "Голосовое: удерживайте для записи, коснитесь для режима видеосообщения"
+            else -> "Видеосообщение: удерживайте для записи, коснитесь для режима голосового"
         }
         sendButton.isEnabled = !mediaUploadInProgress
         sendButton.alpha = if (mediaUploadInProgress) 0.45f else 1f
@@ -610,7 +610,7 @@ class SteamChatFragment(
             sendButton.animate().scaleX(1f).scaleY(1f).setDuration(150L).start()
         }
         updateSendButton()
-        val label = if (recordingMode == RecordingMode.VOICE) "Голосовое" else "Кружок"
+        val label = if (recordingMode == RecordingMode.VOICE) "Голосовое" else "Видеосообщение"
         Toast.makeText(sendButton.context, "$label: удерживайте кнопку для записи", Toast.LENGTH_SHORT).show()
     }
 
@@ -703,7 +703,7 @@ class SteamChatFragment(
 
     private fun showAttachMenu(context: Context) {
         if (mediaUploadInProgress) return
-        val actions = arrayOf("Записать кружок", "Выбрать MP4")
+        val actions = arrayOf("Записать видеосообщение", "Выбрать MP4")
         AlertDialog.Builder(context).setItems(actions) { _, which ->
             if (which == 0) requestRoundVideo(context) else pickMp4()
         }.show()
@@ -880,7 +880,7 @@ class SteamChatFragment(
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
         val circleHint = TextView(context).apply {
-            text = if (gestureControlled) "Кружок · отпустите для отправки" else "Идёт запись кружка"
+            text = if (gestureControlled) "Видеосообщение · отпустите для отправки" else "Идёт запись видеосообщения"
             textSize = 14f
             setTextColor(SteamPalette.headerSubtitle)
         }
