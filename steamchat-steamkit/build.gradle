@@ -1,6 +1,6 @@
 // Real Steam backend: implements SteamService (steamchat-domain) using JavaSteam, a JVM port of
 // SteamKit2 - proven working end-to-end (login, Steam Guard, friends, real-time messages) on
-// Android in /spike. Kept as its own module so the heavy javasteam/bouncycastle dependencies
+// Android in an early standalone spike (since removed). Kept as its own module so the heavy javasteam/bouncycastle dependencies
 // don't leak into steamchat-domain's consumers (fake backend, unit tests, future UI tests).
 apply plugin: 'org.jetbrains.kotlin.jvm'
 
@@ -12,7 +12,7 @@ dependencies {
     implementation project(':steamchat-domain')
 
     implementation 'in.dragonbra:javasteam:1.8.0'
-    // Android's built-in BouncyCastle is stripped down; JavaSteam needs the full provider (confirmed in /spike).
+    // Android's built-in BouncyCastle is stripped down; JavaSteam needs the full provider (confirmed in the early spike).
     implementation 'org.bouncycastle:bcprov-jdk18on:1.85.2'
     // javasteam declares this as scope=runtime, so it's on our runtime classpath already but not
     // the compile one - needed explicitly here because we build/read a couple of protobuf
