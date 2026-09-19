@@ -22,6 +22,7 @@ import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesChatSteamclie
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesChatSteamclient.CChatRoom_SetSessionActiveChatRoomGroups_Request
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesChatSteamclient.ChatRoomClient_NotifyChatGroupUserStateChanged_Notification
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesFriendmessagesSteamclient.CFriendMessages_GetRecentMessages_Request
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesFriendmessagesSteamclient.CFriendMessages_SendMessage_Request
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesPlayerSteamclient.CPlayer_GetEmoticonList_Request
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesPlayerSteamclient.CPlayer_GetOwnedGames_Request
 import `in`.dragonbra.javasteam.rpc.service.ChatRoom
@@ -49,8 +50,10 @@ import `in`.dragonbra.javasteam.steam.steamclient.callbacks.DisconnectedCallback
 import `in`.dragonbra.javasteam.types.SteamID
 import org.steamchat.domain.SteamGamePresence
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -60,6 +63,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.future.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -76,6 +80,7 @@ import org.steamchat.domain.SteamIncomingVoiceCall
 import org.steamchat.domain.SteamSticker
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamNameHistoryEntry
+import org.steamchat.domain.SteamNotificationEvent
 import org.steamchat.domain.SteamProfileStats
 import org.steamchat.domain.SteamStatus
 import org.steamchat.domain.SteamUser
@@ -83,6 +88,8 @@ import org.steamchat.service.BadgesCache
 import org.steamchat.service.CachedBadges
 import org.steamchat.service.NoOpBadgesCache
 import org.steamchat.service.SessionStore
+import org.steamchat.service.MessageHistoryStore
+import org.steamchat.service.NoOpMessageHistoryStore
 import org.steamchat.service.SteamConnectionState
 import org.steamchat.service.SteamGuardHandler
 import org.steamchat.service.SteamLoginResult
@@ -96,6 +103,8 @@ import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+
+internal fun toSteamChatText(text: String): String = text.replace('ː', ':')
 
 /**
  * Real Steam backend on top of JavaSteam - the same API surface exercised end-to-end (real
@@ -115,11 +124,12 @@ class JavaSteamService internal constructor(
     private val sessionStore: SessionStore,
     private val badgesCache: BadgesCache,
     private val webDataSource: SteamWebDataSource,
+    private val messageHistoryStore: MessageHistoryStore = NoOpMessageHistoryStore,
 ) : SteamService {
 
     /** Public entry point - unchanged signature for existing callers (e.g. SteamServiceHolder), which can't name the internal [SteamWebDataSource] type anyway. */
-    constructor(sessionStore: SessionStore, badgesCache: BadgesCache = NoOpBadgesCache) :
-        this(sessionStore, badgesCache, RealSteamWebDataSource)
+    constructor(sessionStore: SessionStore, badgesCache: BadgesCache = NoOpBadgesCache, messageHistoryStore: MessageHistoryStore = NoOpMessageHistoryStore) :
+        this(sessionStore, badgesCache, RealSteamWebDataSource, messageHistoryStore)
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -161,8 +171,16 @@ class JavaSteamService internal constructor(
 
     private val friendsById = ConcurrentHashMap<Long, SteamUser>()
     private val knownUsersById = ConcurrentHashMap<Long, SteamUser>()
+    private val gameNamesByAppId = ConcurrentHashMap<Int, String>()
+    private val pendingGameNames = ConcurrentHashMap.newKeySet<Int>()
     private val friendIds = ConcurrentHashMap.newKeySet<Long>()
     private val messagesByFriend = ConcurrentHashMap<Long, MutableList<SteamMessage>>()
+    private val messageHistories = ConcurrentHashMap<Long, MutableStateFlow<List<SteamMessage>>>()
+    private val historyMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val diskHistoryLoaded = ConcurrentHashMap.newKeySet<Long>()
+    private val historyLock = Any()
+    private var historyAccountId: Long? = null
+    private var reconnectJob: Job? = null
     private val unreadCounts = ConcurrentHashMap<Long, Int>()
     private val nextMessageId = AtomicLong(1)
 
@@ -176,7 +194,7 @@ class JavaSteamService internal constructor(
 
     /** Steam keeps recent friend-message history server-side; fetched once per friend, on demand. */
     private val historyLoaded = ConcurrentHashMap.newKeySet<Long>()
-    private val pendingHistoryRequests = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+    private val pendingHistoryRequests = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
 
     private val _connectionState = MutableStateFlow(SteamConnectionState.DISCONNECTED)
     private val _currentUser = MutableStateFlow<SteamUser?>(null)
@@ -185,6 +203,9 @@ class JavaSteamService internal constructor(
     private val _chatGroups = MutableStateFlow<List<SteamChatGroup>>(emptyList())
     private val _incomingVoiceCall = MutableStateFlow<SteamIncomingVoiceCall?>(null)
     private val incomingMessages = MutableSharedFlow<SteamMessage>(extraBufferCapacity = 64)
+    private val notificationEvents = MutableSharedFlow<SteamNotificationEvent>(extraBufferCapacity = 64)
+
+    override fun observeNotificationEvents(): Flow<SteamNotificationEvent> = notificationEvents
 
     override val connectionState: StateFlow<SteamConnectionState> get() = _connectionState
     override val incomingVoiceCall: StateFlow<SteamIncomingVoiceCall?> get() = _incomingVoiceCall
@@ -238,6 +259,7 @@ class JavaSteamService internal constructor(
         val isRunning = AtomicBoolean(true)
         val subscriptions = mutableListOf<AutoCloseable>()
         val loginResult = CompletableDeferred<SteamLoginResult>()
+        val reconnectBackoff = ReconnectBackoff()
 
         // Cleared once the one-time credential auth attempt resolves (success or failure), so
         // neither the plaintext password nor the Activity-holding guard handler stays reachable
@@ -246,6 +268,7 @@ class JavaSteamService internal constructor(
         var pendingAuthenticator: GuardHandlerAuthenticator? = GuardHandlerAuthenticator(serviceScope, guardHandler)
 
         subscriptions += manager.subscribe(ConnectedCallback::class.java) {
+            if (activeSteamClient !== client || !isRunning.get()) return@subscribe
             val cached = cachedLogOnDetails
             if (cached != null) {
                 // Reconnect after an already-successful login: resume with the same session
@@ -296,19 +319,37 @@ class JavaSteamService internal constructor(
         }
 
         subscriptions += manager.subscribe(DisconnectedCallback::class.java) { cb ->
+            if (activeSteamClient !== client) {
+                isRunning.set(false)
+                return@subscribe
+            }
             cancelWebRtcProbe()
             _incomingVoiceCall.value = null
             if (cb.isUserInitiated) {
+                reconnectJob?.cancel()
                 _connectionState.value = SteamConnectionState.DISCONNECTED
                 isRunning.set(false)
             } else {
                 _connectionState.value = SteamConnectionState.RECONNECTING
-                Thread.sleep(2000L)
-                client.connect()
+                reconnectJob?.cancel()
+                reconnectJob = serviceScope.launch {
+                    while (isRunning.get() && activeSteamClient === client) {
+                        val retryDelay = reconnectBackoff.nextDelay()
+                        System.out.println("Steam reconnect: retry in ${retryDelay}ms")
+                        delay(retryDelay)
+                        if (!isRunning.get() || activeSteamClient !== client) break
+                        try {
+                            withContext(Dispatchers.IO) { client.connect() }
+                            break
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { /* A failed socket open retries with the same capped backoff. */ }
+                    }
+                }
             }
         }
 
         subscriptions += manager.subscribe(LoggedOnCallback::class.java) { cb ->
+            if (activeSteamClient !== client || !isRunning.get()) return@subscribe
             if (cb.result != EResult.OK) {
                 _connectionState.value = SteamConnectionState.DISCONNECTED
                 // Whatever details we tried (fresh or resumed) were rejected - don't keep retrying
@@ -321,14 +362,22 @@ class JavaSteamService internal constructor(
                 client.disconnect()
                 if (!loginResult.isCompleted) loginResult.complete(SteamLoginResult.Failure(cb.result.toString()))
             } else {
+                reconnectJob?.cancel()
+                reconnectBackoff.reset()
                 _connectionState.value = SteamConnectionState.CONNECTED
                 val steamId64 = user.steamID?.convertToUInt64() ?: 0L
-                _currentUser.value = SteamUser(
-                    steamId64 = steamId64,
-                    personaName = username,
-                    avatarUrl = null,
-                    status = SteamStatus.ONLINE,
-                )
+                synchronized(historyLock) {
+                    if (activeSteamClient !== client || !isRunning.get()) return@subscribe
+                    if (historyAccountId != steamId64) {
+                        messagesByFriend.clear()
+                        messageHistories.values.forEach { it.value = emptyList() }
+                        diskHistoryLoaded.clear()
+                        unreadCounts.clear()
+                        historyAccountId = steamId64
+                    }
+                    historyLoaded.clear()
+                    _currentUser.value = SteamUser(steamId64, username, null, SteamStatus.ONLINE)
+                }
                 serviceScope.launch { refreshChatGroups() }
                 if (!loginResult.isCompleted) loginResult.complete(SteamLoginResult.Success)
             }
@@ -376,13 +425,18 @@ class JavaSteamService internal constructor(
         }
 
         subscriptions += manager.subscribe(PersonaStateCallback::class.java) { cb ->
+            if (activeSteamClient !== client) return@subscribe
             val id = cb.friendId.convertToUInt64()
             val isSelf = id == user.steamID?.convertToUInt64()
             // Steam reports our own presence through the same callback as friends - real Steam has
             // no "message yourself" feature, so self is routed into _currentUser instead of
             // friendsById; this is also the only place _currentUser's avatar/status/gameName ever
             // get filled in (login() only knows the name).
-            val merged = mergePersona(if (isSelf) _currentUser.value else knownUsersById[id], id, cb)
+            val persona = mergePersona(if (isSelf) _currentUser.value else knownUsersById[id], id, cb)
+            val playing = persona.game as? SteamGamePresence.Playing
+            val merged = playing?.appId?.let { appId ->
+                gameNamesByAppId[appId]?.let { withResolvedGameName(persona, appId, it) }
+            } ?: persona
             if (isSelf) {
                 _currentUser.value = merged
             } else {
@@ -394,9 +448,28 @@ class JavaSteamService internal constructor(
                 }
             }
             updateGroupMessageIdentity(merged)
+            val unresolved = merged.game as? SteamGamePresence.Playing
+            val appId = unresolved?.appId
+            if (unresolved?.name == null && appId != null && pendingGameNames.add(appId)) {
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val name = fetchStoreGameName(appId) ?: return@launch
+                        if (activeSteamClient !== client) return@launch
+                        gameNamesByAppId[appId] = name
+                        _currentUser.update { it?.let { user -> withResolvedGameName(user, appId, name) } }
+                        knownUsersById.replaceAll { _, user -> withResolvedGameName(user, appId, name) }
+                        friendsById.replaceAll { _, user -> withResolvedGameName(user, appId, name) }
+                        _friends.value = friendsById.values.sortedBy { it.personaName }
+                        rebuildDialogs()
+                    } finally {
+                        pendingGameNames.remove(appId)
+                    }
+                }
+            }
         }
 
         subscriptions += manager.subscribe(FriendsListCallback::class.java) { cb ->
+            if (activeSteamClient !== client) return@subscribe
             if (!cb.isIncremental) friendIds.clear()
             cb.friendList.forEach { entry ->
                 val id = entry.steamID.convertToUInt64()
@@ -425,6 +498,7 @@ class JavaSteamService internal constructor(
         }
 
         subscriptions += manager.subscribe(FriendMsgHistoryCallback::class.java) { cb ->
+            if (activeSteamClient !== client) return@subscribe
             val friendId = cb.steamID.convertToUInt64()
             if (cb.result == EResult.OK) {
                 val myId = _currentUser.value?.steamId64 ?: 0L
@@ -442,15 +516,9 @@ class JavaSteamService internal constructor(
                 // compute() replaces the whole list atomically instead of mutating shared state in
                 // place, so a concurrent read (getMessageHistory) or a concurrent writer
                 // (incoming notifications/sendMessage, on other threads) can never see a half-updated list.
-                messagesByFriend.compute(friendId) { _, existing ->
-                    (historyMessages + existing.orEmpty())
-                        .distinctBy { Triple(it.senderSteamId64, it.timestamp, it.text) }
-                        .sortedBy { it.timestamp }
-                        .toMutableList()
-                }
-                rebuildDialogs()
+                mergeHistory(friendId, historyMessages, expectedAccountId = user.steamID?.convertToUInt64() ?: 0L)
             }
-            pendingHistoryRequests.remove(friendId)?.complete(Unit)
+            pendingHistoryRequests.remove(friendId)?.complete(cb.result == EResult.OK)
         }
 
         // Not the legacy FriendMsgCallback (ClientFriendMsgIncoming): that one only arrives in
@@ -462,6 +530,7 @@ class JavaSteamService internal constructor(
             CFriendMessages_IncomingMessage_Notification.Builder::class.java,
         ) { cb ->
             val body = cb.body.build()
+            if (activeSteamClient !== client) return@subscribeServiceNotification
             val text = body.messageNoBbcode.takeIf { it.isNotBlank() } ?: body.message
             if (body.chatEntryType == EChatEntryType.ChatMsg.code() && !text.isNullOrEmpty()) {
                 val friendId = body.steamidFriend
@@ -477,10 +546,11 @@ class JavaSteamService internal constructor(
                         ?: System.currentTimeMillis(),
                     isOutgoing = outgoing,
                 )
-                messagesByFriend.compute(friendId) { _, existing -> (existing.orEmpty() + message).toMutableList() }
+                if (!mergeHistory(friendId, listOf(message), expectedAccountId = user.steamID?.convertToUInt64() ?: 0L)) return@subscribeServiceNotification
                 if (!outgoing) unreadCounts[friendId] = (unreadCounts[friendId] ?: 0) + 1
                 rebuildDialogs()
                 incomingMessages.tryEmit(message)
+                SteamNotificationEvent.from(message)?.let { notificationEvents.tryEmit(it) }
             }
         }
 
@@ -541,11 +611,30 @@ class JavaSteamService internal constructor(
     }
 
     override suspend fun logout() {
+        reconnectJob?.cancel()
         cancelWebRtcProbe()
         _incomingVoiceCall.value = null
         cachedLogOnDetails = null
         sessionStore.clear()
-        steamUserHandler?.logOff()
+        val client = activeSteamClient
+        activeSteamClient = null
+        withContext(Dispatchers.IO) {
+            steamUserHandler?.logOff()
+            client?.disconnect()
+        }
+        _connectionState.value = SteamConnectionState.DISCONNECTED
+        synchronized(historyLock) {
+            _currentUser.value = null
+            historyAccountId = null
+            messagesByFriend.clear()
+            messageHistories.values.forEach { it.value = emptyList() }
+            historyLoaded.clear()
+            diskHistoryLoaded.clear()
+        }
+        _friends.value = emptyList()
+        _dialogs.value = emptyList()
+        friendsById.clear()
+        friendIds.clear()
         _chatGroups.value = emptyList()
         groupMessages.clear()
         groupHistoryCursors.clear()
@@ -789,34 +878,56 @@ class JavaSteamService internal constructor(
 
     override suspend fun getNameHistory(steamId64: Long): List<SteamNameHistoryEntry> = webDataSource.fetchNameHistory(steamId64)
 
-    /**
-     * First call per friend triggers a requestMessageHistory() round trip to Steam's servers and
-     * waits (up to 5s) for the FriendMsgHistoryCallback response, so history survives session
-     * restarts even though messagesByFriend itself is in-memory only. Later calls just return the
-     * cache - no persisted local disk store yet (that's still section 17/21 MVP-2: offline access
-     * with zero network at all).
-     */
+    /** Restores disk history immediately; Steam refreshes the observable snapshot in the background. */
     override suspend fun getMessageHistory(friendSteamId64: Long): List<SteamMessage> {
-        if (historyLoaded.add(friendSteamId64)) {
-            val fetched = fetchRecentMessages(friendSteamId64)
-            if (fetched.isNotEmpty()) {
-                mergeHistory(friendSteamId64, fetched)
-            } else {
-                // Nothing from the unified service (not logged in yet, RPC error, timeout) - fall
-                // back to the classic handler so a chat still opens with whatever Steam will give.
-                val friends = steamFriendsHandler
-                if (friends != null) {
-                    withContext(Dispatchers.IO) {
-                        val deferred = CompletableDeferred<Unit>()
-                        pendingHistoryRequests[friendSteamId64] = deferred
-                        friends.requestMessageHistory(SteamID(friendSteamId64))
-                        withTimeoutOrNull(5000L) { deferred.await() }
-                        pendingHistoryRequests.remove(friendSteamId64)
+        val accountId = _currentUser.value?.steamId64 ?: return emptyList()
+        historyMutexes.computeIfAbsent(friendSteamId64) { Mutex() }.withLock {
+            val loadDisk = synchronized(historyLock) {
+                if (historyAccountId != accountId || _currentUser.value?.steamId64 != accountId) return emptyList()
+                diskHistoryLoaded.add(friendSteamId64)
+            }
+            if (loadDisk) {
+                val cached = withContext(Dispatchers.IO) {
+                    runCatching { messageHistoryStore.load(accountId, friendSteamId64) }.getOrElse {
+                        diskHistoryLoaded.remove(friendSteamId64)
+                        emptyList()
                     }
                 }
+                if (_currentUser.value?.steamId64 == accountId) mergeHistory(friendSteamId64, cached, persist = false, expectedAccountId = accountId)
+                cached.maxOfOrNull { it.id }?.let { maximum -> nextMessageId.updateAndGet { maxOf(it, maximum + 1) } }
             }
         }
+        val refresh = synchronized(historyLock) {
+            if (historyAccountId != accountId || _currentUser.value?.steamId64 != accountId) return emptyList()
+            connectionState.value == SteamConnectionState.CONNECTED && historyLoaded.add(friendSteamId64)
+        }
+        if (refresh) {
+            serviceScope.launch { refreshMessageHistory(accountId, friendSteamId64) }
+        }
         return messagesByFriend[friendSteamId64]?.toList().orEmpty()
+    }
+
+    override fun observeMessageHistory(friendSteamId64: Long): StateFlow<List<SteamMessage>> =
+        synchronized(historyLock) { messageHistories.computeIfAbsent(friendSteamId64) { MutableStateFlow(messagesByFriend[friendSteamId64]?.toList().orEmpty()) } }
+
+    private suspend fun refreshMessageHistory(accountId: Long, friendId: Long) {
+        val fetched = fetchRecentMessages(friendId)
+        if (_currentUser.value?.steamId64 != accountId) return
+        if (fetched != null) {
+            mergeHistory(friendId, fetched, expectedAccountId = accountId)
+            return
+        }
+        val deferred = CompletableDeferred<Boolean>()
+        pendingHistoryRequests[friendId] = deferred
+        val success = withContext(Dispatchers.IO) {
+            try {
+                steamFriendsHandler?.requestMessageHistory(SteamID(friendId))
+                withTimeoutOrNull(5000L) { deferred.await() } == true
+            } catch (e: CancellationException) { historyLoaded.remove(friendId); throw e }
+            catch (_: Exception) { false }
+            finally { pendingHistoryRequests.remove(friendId, deferred) }
+        }
+        if (!success) historyLoaded.remove(friendId)
     }
 
     /**
@@ -828,9 +939,9 @@ class JavaSteamService internal constructor(
      * getRecentMessages takes an explicit count, so history depth is ours to choose rather than
      * whatever tail the old call felt like handing back.
      */
-    private suspend fun fetchRecentMessages(friendSteamId64: Long): List<SteamMessage> {
-        val service = friendMessagesService ?: return emptyList()
-        val myId = _currentUser.value?.steamId64 ?: return emptyList()
+    private suspend fun fetchRecentMessages(friendSteamId64: Long): List<SteamMessage>? {
+        val service = friendMessagesService ?: return null
+        val myId = _currentUser.value?.steamId64 ?: return null
         return try {
             withTimeoutOrNull(8000L) {
                 val request = CFriendMessages_GetRecentMessages_Request.newBuilder()
@@ -843,7 +954,7 @@ class JavaSteamService internal constructor(
                     .setBbcodeFormat(false)
                     .build()
                 val response = withContext(Dispatchers.IO) { service.getRecentMessages(request).toFuture().await() }
-                if (response.result != EResult.OK) return@withTimeoutOrNull emptyList()
+                if (response.result != EResult.OK) return@withTimeoutOrNull null
 
                 val myAccountId = SteamID(myId).accountID
                 response.body.messagesList.map { entry ->
@@ -858,40 +969,57 @@ class JavaSteamService internal constructor(
                         isOutgoing = outgoing,
                     )
                 }
-            } ?: emptyList()
+            }
         } catch (e: Exception) {
-            emptyList()
+            null
         }
     }
 
-    /** Same atomic merge/dedup the classic history callback uses, so both paths agree. */
-    private fun mergeHistory(friendSteamId64: Long, fetched: List<SteamMessage>) {
-        messagesByFriend.compute(friendSteamId64) { _, existing ->
-            (fetched + existing.orEmpty())
-                .distinctBy { Triple(it.senderSteamId64, it.timestamp, it.text) }
-                .sortedBy { it.timestamp }
-                .toMutableList()
+    /** All history and live-message writes share the same atomic merge and disk append. */
+    private fun mergeHistory(friendSteamId64: Long, fetched: List<SteamMessage>, persist: Boolean = true, expectedAccountId: Long): Boolean {
+        synchronized(historyLock) {
+            if (historyAccountId != expectedAccountId || _currentUser.value?.steamId64 != expectedAccountId) return false
+            messagesByFriend.compute(friendSteamId64) { _, existing ->
+                val merged = mergeMessageHistory(existing.orEmpty(), fetched)
+                messageHistories.computeIfAbsent(friendSteamId64) { MutableStateFlow(emptyList()) }.value = merged
+                merged.toMutableList()
+            }
+        }
+        if (persist && fetched.isNotEmpty()) serviceScope.launch(Dispatchers.IO) {
+            try { messageHistoryStore.merge(expectedAccountId, friendSteamId64, fetched) }
+            catch (e: Exception) { System.err.println("Steam history cache write failed: ${e.javaClass.simpleName}") }
         }
         rebuildDialogs()
+        return true
     }
 
     override fun observeMessages(friendSteamId64: Long): Flow<SteamMessage> =
         incomingMessages.filter { it.chatPartnerSteamId64 == friendSteamId64 }
 
     override suspend fun sendMessage(friendSteamId64: Long, text: String) {
-        val friends = steamFriendsHandler ?: error("SteamService.sendMessage called before login")
-        withContext(Dispatchers.IO) {
-            friends.sendChatMessage(SteamID(friendSteamId64), EChatEntryType.ChatMsg, text)
-        }
+        val accountId = _currentUser.value?.steamId64 ?: error("Steam is not logged in")
+        val service = friendMessagesService ?: error("SteamService.sendMessage called before login")
+        val request = CFriendMessages_SendMessage_Request.newBuilder()
+            .setSteamid(friendSteamId64)
+            .setChatEntryType(EChatEntryType.ChatMsg.code())
+            .setMessage(toSteamChatText(text))
+            .setContainsBbcode(true)
+            .build()
+        val response = withTimeoutOrNull(8000L) {
+            withContext(Dispatchers.IO) { service.sendMessage(request).toFuture().await() }
+        } ?: error("Steam message timed out")
+        if (response.result != EResult.OK) error("Steam message failed: ${response.result}")
+        if (_currentUser.value?.steamId64 != accountId) return
         val message = SteamMessage(
             id = nextMessageId.getAndIncrement(),
             chatPartnerSteamId64 = friendSteamId64,
-            senderSteamId64 = _currentUser.value?.steamId64 ?: 0L,
-            text = text,
-            timestamp = System.currentTimeMillis(),
+            senderSteamId64 = accountId,
+            text = response.body.messageWithoutBbCode.takeIf { it.isNotBlank() } ?: text,
+            timestamp = response.body.serverTimestamp.toLong().takeIf { it > 0 }?.times(1000L)
+                ?: (System.currentTimeMillis() / 1000L) * 1000L,
             isOutgoing = true,
         )
-        messagesByFriend.compute(friendSteamId64) { _, existing -> (existing.orEmpty() + message).toMutableList() }
+        if (!mergeHistory(friendSteamId64, listOf(message), expectedAccountId = accountId)) return
         rebuildDialogs()
         incomingMessages.tryEmit(message)
     }
@@ -963,7 +1091,7 @@ class JavaSteamService internal constructor(
             val request = CChatRoom_SendChatMessage_Request.newBuilder()
                 .setChatGroupId(groupId)
                 .setChatId(channelId)
-                .setMessage(text)
+                .setMessage(toSteamChatText(text))
                 .build()
             withContext(Dispatchers.IO) { service.sendChatMessage(request).toFuture().await() }
         } ?: error("Steam group message timed out")
@@ -1114,6 +1242,7 @@ class JavaSteamService internal constructor(
         mergeGroupMessages(GroupChannelKey(callback.chatGroupId, callback.chatId), listOf(message))
         requestGroupMessageAuthors(listOf(message))
         updateGroupChannelActivity(message, unread = !message.isOutgoing)
+        SteamNotificationEvent.from(message)?.let { notificationEvents.tryEmit(it) }
     }
 
     private fun handleModifiedGroupMessages(callback: CChatRoom_ChatMessageModified_Notification) {

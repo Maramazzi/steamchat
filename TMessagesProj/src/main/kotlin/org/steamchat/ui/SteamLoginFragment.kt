@@ -164,7 +164,10 @@ class SteamLoginFragment : SteamBaseFragment() {
         statusText.text = "Восстановление сессии..."
         scope.launch {
             when (val result = service.resumeSession()) {
-                is SteamLoginResult.Success -> presentFragment(SteamDialogsFragment(), true)
+                is SteamLoginResult.Success -> {
+                    (getParentActivity() as? SteamDebugActivity)?.onSteamLogin()
+                    presentFragment(SteamDialogsFragment(), true)
+                }
                 is SteamLoginResult.Failure -> {
                     statusText.text = ""
                     setLoginEnabled(true)
@@ -192,7 +195,10 @@ class SteamLoginFragment : SteamBaseFragment() {
         val guardHandler = AndroidSteamGuardHandler(activity)
         scope.launch {
             when (val result = service.login(username, password, guardHandler)) {
-                is SteamLoginResult.Success -> presentFragment(SteamDialogsFragment(), true)
+                is SteamLoginResult.Success -> {
+                    (getParentActivity() as? SteamDebugActivity)?.onSteamLogin()
+                    presentFragment(SteamDialogsFragment(), true)
+                }
                 is SteamLoginResult.Failure -> {
                     statusText.text = "Ошибка: ${result.reason}"
                     setLoginEnabled(true)

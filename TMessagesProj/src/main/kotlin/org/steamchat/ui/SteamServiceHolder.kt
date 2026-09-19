@@ -16,6 +16,7 @@ object SteamServiceHolder {
         JavaSteamService(
             EncryptedSessionStore(ApplicationLoader.applicationContext),
             PrefsBadgesCache(ApplicationLoader.applicationContext),
+            org.steamchat.storage.SqliteMessageHistoryStore(ApplicationLoader.applicationContext),
         )
     }
 }

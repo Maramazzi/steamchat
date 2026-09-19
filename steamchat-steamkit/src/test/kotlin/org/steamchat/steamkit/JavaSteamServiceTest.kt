@@ -25,6 +25,15 @@ class JavaSteamServiceTest {
 
     private val service = JavaSteamService(NoOpSessionStore)
 
+    @Test
+    fun `outgoing Steam emoticons use real colons`() {
+        assertEquals(
+            "Hi :steamhappy: and :foo_2:!",
+            toSteamChatText("Hi ːsteamhappyː and :foo_2:!"),
+        )
+        assertEquals("Plain text :invalid-name:", toSteamChatText("Plain text :invalid-name:"))
+    }
+
     private fun callback(
         flags: Set<EClientPersonaStateFlag>,
         personaState: Int = EPersonaState.Online.code(),
@@ -181,6 +190,27 @@ class JavaSteamServiceTest {
         val result = service.mergePersona(null, 1L, cb)
 
         assertEquals(SteamGamePresence.Playing(570, 570L, null), result.game)
+    }
+
+    @Test
+    fun `store title fills only the matching unnamed live game`() {
+        val player = SteamUser(1L, "Player", null, SteamStatus.ONLINE, SteamGamePresence.Playing(570, 570L, null))
+        assertEquals(
+            SteamGamePresence.Playing(570, 570L, "Dota 2"),
+            withResolvedGameName(player, 570, "Dota 2").game,
+        )
+        assertEquals(player, withResolvedGameName(player, 440, "Team Fortress 2"))
+        assertEquals(
+            SteamGamePresence.Playing(570, 570L, "Dota 2"),
+            withResolvedGameName(player.copy(game = SteamGamePresence.Playing(570, 570L, "Dota 2")), 570, "Old title").game,
+        )
+    }
+
+    @Test
+    fun `store app details yields only a successful nonblank title`() {
+        assertEquals("Dota 2", parseStoreGameName(570, """{"570":{"success":true,"data":{"name":"Dota 2"}}}"""))
+        assertEquals(null, parseStoreGameName(570, """{"570":{"success":false}}"""))
+        assertEquals(null, parseStoreGameName(570, """{"570":{"success":true,"data":{"name":" "}}}"""))
     }
 
     @Test

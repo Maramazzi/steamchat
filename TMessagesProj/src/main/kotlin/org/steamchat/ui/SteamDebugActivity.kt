@@ -42,7 +42,44 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var incomingDialog: AlertDialog? = null
     private var pendingPermissionCall: SteamIncomingVoiceCall? = null
+    private var answeringCallId: Long? = null
     private var bottomInset = 0
+    private var resumed = false
+
+    fun onSteamLogout() {
+        actionBarLayout.removeAllFragments()
+        actionBarLayout.addFragmentToStack(SteamLoginFragment())
+        actionBarLayout.showLastFragment()
+    }
+
+    fun onSteamLogin() {
+        val background = Intent(this, SteamNotificationService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(background) else startService(background)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !getPreferences(MODE_PRIVATE).getBoolean("notifications_requested", false)) {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("notifications_requested", true).apply()
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0x532)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        answerNotificationCall()
+        openNotificationChat()
+    }
+
+    private fun openNotificationChat() {
+        if (!intent.hasExtra("steam_chat_id") || service.observeCurrentUser().value == null ||
+            actionBarLayout.fragmentStack.lastOrNull() is SteamLoginFragment) return
+        val id = intent.getLongExtra("steam_chat_id", 0)
+        val channel = if (intent.hasExtra("steam_channel_id")) intent.getLongExtra("steam_channel_id", 0) else null
+        intent.removeExtra("steam_chat_id")
+        intent.removeExtra("steam_channel_id")
+        switchToTab(SteamNavTab.CHATS)
+        val name = service.observeFriends().value.firstOrNull { it.steamId64 == id }?.personaName ?: id.toString()
+        actionBarLayout.presentFragment(if (channel == null) SteamChatFragment(id, name) else SteamChatFragment.forGroup(id, channel))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,7 +148,12 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
         actionBarLayout.showLastFragment()
         scope.launch {
             service.incomingVoiceCall.collect { call ->
-                if (call == null) incomingDialog?.dismiss() else showIncomingCall(call)
+                if (call == null) {
+                    answeringCallId = null
+                    incomingDialog?.dismiss()
+                } else if (resumed) {
+                    if (!answerNotificationCall()) showIncomingCall(call)
+                }
             }
         }
         scope.launch {
@@ -146,12 +188,19 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         ApplicationLoader.mainInterfacePaused = false
         actionBarLayout.onResume()
+        updateVisibleChat()
+        service.incomingVoiceCall.value?.let { call ->
+            if (!answerNotificationCall()) showIncomingCall(call)
+        }
     }
 
     override fun onPause() {
         super.onPause()
+        resumed = false
+        SteamNotificationService.visibleChat = null
         ApplicationLoader.mainInterfacePaused = true
         actionBarLayout.onPause()
     }
@@ -231,10 +280,49 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
      * transition, because that first (and only) layout-listener firing saw stack size 2
      * (SteamLoginFragment not gone yet), not the 1 it settled on moments later.
      */
-    fun onFragmentBecameFullyVisible() = updateNavState()
+    fun onFragmentBecameFullyVisible() {
+        updateNavState()
+        updateVisibleChat()
+        openNotificationChat()
+        if (!answerNotificationCall() && resumed) service.incomingVoiceCall.value?.let(::showIncomingCall)
+    }
+
+    private fun answerNotificationCall(): Boolean {
+        if (!resumed || !intent.hasExtra(SteamNotificationService.ANSWER_CALL) ||
+            actionBarLayout.fragmentStack.lastOrNull() is SteamLoginFragment) return false
+        val id = intent.getLongExtra(SteamNotificationService.ANSWER_CALL, 0)
+        intent.removeExtra(SteamNotificationService.ANSWER_CALL)
+        val call = service.incomingVoiceCall.value?.takeIf { it.voiceChatId == id } ?: return false
+        incomingDialog?.dismiss()
+        requestAcceptIncomingCall(call)
+        return true
+    }
+
+    private fun requestAcceptIncomingCall(call: SteamIncomingVoiceCall) {
+        answeringCallId = call.voiceChatId
+        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager).cancel(SteamNotificationService.CALL_NOTIFICATION_ID)
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingPermissionCall = call
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_INCOMING_MICROPHONE)
+        } else acceptIncomingCall(call)
+    }
+
+    private fun declineIncomingCall(call: SteamIncomingVoiceCall) {
+        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager).cancel(SteamNotificationService.CALL_NOTIFICATION_ID)
+        scope.launch { service.answerIncomingVoiceCall(call, false) }
+    }
+
+    private fun updateVisibleChat() {
+        SteamNotificationService.visibleChat = if (resumed)
+            (actionBarLayout.fragmentStack.lastOrNull() as? SteamChatFragment)?.notificationChat() else null
+        SteamNotificationService.visibleChat?.let { (chat, channel) ->
+            (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager).cancel("$chat:$channel", 2)
+        }
+    }
 
     private fun showIncomingCall(call: SteamIncomingVoiceCall) {
-        if (incomingDialog != null) return
+        if (incomingDialog != null || answeringCallId == call.voiceChatId ||
+            actionBarLayout.fragmentStack.lastOrNull() is SteamLoginFragment) return
         val name = service.observeFriends().value.firstOrNull { it.steamId64 == call.partnerSteamId64 }
             ?.personaName ?: call.partnerSteamId64.toString()
         var answered = false
@@ -244,7 +332,7 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
             .setPositiveButton("Принять", null)
             .setNegativeButton("Отклонить") { _, _ ->
                 answered = true
-                scope.launch { service.answerIncomingVoiceCall(call, false) }
+                declineIncomingCall(call)
             }
             .create()
         incomingDialog = dialog
@@ -252,22 +340,18 @@ class SteamDebugActivity : Activity(), INavigationLayout.INavigationLayoutDelega
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 answered = true
                 dialog.dismiss()
-                if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                    pendingPermissionCall = call
-                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_INCOMING_MICROPHONE)
-                } else {
-                    acceptIncomingCall(call)
-                }
+                requestAcceptIncomingCall(call)
             }
         }
         dialog.setOnCancelListener {
-            if (!answered) scope.launch { service.answerIncomingVoiceCall(call, false) }
+            if (!answered) declineIncomingCall(call)
         }
         dialog.setOnDismissListener { incomingDialog = null }
         dialog.show()
     }
 
     private fun acceptIncomingCall(call: SteamIncomingVoiceCall) {
+        if (service.incomingVoiceCall.value != call) return
         val name = service.observeFriends().value.firstOrNull { it.steamId64 == call.partnerSteamId64 }
             ?.personaName ?: call.partnerSteamId64.toString()
         // The same screen an outgoing call uses: it answers the call itself and owns it from there,

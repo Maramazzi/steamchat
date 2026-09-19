@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.mapNotNull
 import org.steamchat.domain.SteamDialog
 import org.steamchat.domain.SteamChatGroup
 import org.steamchat.domain.SteamGame
@@ -179,6 +180,14 @@ class FakeSteamService : SteamService {
     override fun observeMessages(friendSteamId64: Long): Flow<SteamMessage> =
         incomingMessages.filterNotNull().filter { it.chatPartnerSteamId64 == friendSteamId64 }
 
+    override fun observeMessageHistory(friendSteamId64: Long): StateFlow<List<SteamMessage>> =
+        histories.getOrPut(friendSteamId64) { MutableStateFlow(messagesByFriend[friendSteamId64].orEmpty()) }
+
+    private val histories = mutableMapOf<Long, MutableStateFlow<List<SteamMessage>>>()
+
+    override fun observeNotificationEvents(): Flow<org.steamchat.domain.SteamNotificationEvent> =
+        incomingMessages.filterNotNull().mapNotNull(org.steamchat.domain.SteamNotificationEvent::from)
+
     override suspend fun sendMessage(friendSteamId64: Long, text: String) {
         val list = messagesByFriend.getOrPut(friendSteamId64) { mutableListOf() }
         val message = SteamMessage(
@@ -192,6 +201,7 @@ class FakeSteamService : SteamService {
         list += message
         dialogsFlow.value = buildDialogs()
         incomingMessages.value = message
+        histories[friendSteamId64]?.value = list.toList()
     }
 
     override suspend fun sendMedia(friendSteamId64: Long, filePath: String) {

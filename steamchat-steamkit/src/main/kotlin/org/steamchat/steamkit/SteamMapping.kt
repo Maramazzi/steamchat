@@ -4,6 +4,7 @@ import `in`.dragonbra.javasteam.enums.EPersonaState
 import `in`.dragonbra.javasteam.types.GameID
 import org.steamchat.domain.SteamGamePresence
 import org.steamchat.domain.SteamStatus
+import org.steamchat.domain.SteamUser
 
 internal fun EPersonaState?.toSteamStatus(): SteamStatus = when (this) {
     EPersonaState.Online -> SteamStatus.ONLINE
@@ -36,4 +37,10 @@ internal fun gamePresence(
     } else {
         SteamGamePresence.Playing(appId, id, name, richPresence)
     }
+}
+
+internal fun withResolvedGameName(user: SteamUser, appId: Int, name: String): SteamUser {
+    val playing = user.game as? SteamGamePresence.Playing ?: return user
+    if (playing.appId != appId || playing.name != null) return user
+    return user.copy(game = playing.copy(name = name))
 }

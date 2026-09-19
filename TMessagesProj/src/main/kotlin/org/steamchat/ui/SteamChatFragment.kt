@@ -78,6 +78,8 @@ class SteamChatFragment(
     private var groupMessages: List<SteamGroupMessage> = emptyList()
     private var groupRows: List<GroupChatRow> = emptyList()
     private var activeGroupChannelId: Long? = initialGroupChannelId
+
+    fun notificationChat(): Pair<Long, Long?> = (groupId ?: friendSteamId64) to activeGroupChannelId
     private var currentGroup: SteamChatGroup? = null
     private var groupMessagesJob: Job? = null
     private var groupHistoryHasMore = true
@@ -204,13 +206,12 @@ class SteamChatFragment(
                 }
             }
             scope.launch {
-                messages = service.getMessageHistory(friendSteamId64)
-                updateRows()
+                service.getMessageHistory(friendSteamId64)
                 service.markAsRead(friendSteamId64)
             }
             scope.launch {
-                service.observeMessages(friendSteamId64).collect { incoming ->
-                    messages = messages + incoming
+                service.observeMessageHistory(friendSteamId64).collect { history ->
+                    messages = history
                     updateRows()
                 }
             }
@@ -248,6 +249,7 @@ class SteamChatFragment(
         if (activeGroupChannelId == channelId && groupMessagesJob != null) return
         groupMessagesJob?.cancel()
         activeGroupChannelId = channelId
+        (getParentActivity() as? SteamDebugActivity)?.onFragmentBecameFullyVisible()
         groupMessages = emptyList()
         groupRows = emptyList()
         groupHistoryHasMore = true

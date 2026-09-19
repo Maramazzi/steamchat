@@ -1,11 +1,23 @@
 package org.steamchat.steamkit
 
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URI
+
+internal suspend fun fetchStoreGameName(appId: Int): String? = withContext(Dispatchers.IO) {
+    get("https://store.steampowered.com/api/appdetails?appids=$appId&filters=basic")
+        ?.let { parseStoreGameName(appId, it) }
+}
+
+internal fun parseStoreGameName(appId: Int, json: String): String? = runCatching {
+    val entry = JsonParser.parseString(json).asJsonObject.getAsJsonObject(appId.toString())
+    if (entry.get("success")?.asBoolean != true) null
+    else entry.getAsJsonObject("data")?.get("name")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+}.getOrNull()
 
 /**
  * Bio/status text, "currently playing", level XP progress, badges, and the equipped avatar frame

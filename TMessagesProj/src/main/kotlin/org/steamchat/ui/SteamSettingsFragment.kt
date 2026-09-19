@@ -1,6 +1,9 @@
 package org.steamchat.ui
 
 import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.view.Gravity
@@ -43,7 +46,11 @@ class SteamSettingsFragment : SteamBaseFragment() {
         val column = LinearLayout(context)
         column.orientation = LinearLayout.VERTICAL
         column.addView(buildRow(context, R.drawable.msg_theme, "Тема") { stub(context) })
-        column.addView(buildRow(context, R.drawable.msg_notifications, "Уведомления") { stub(context) })
+        column.addView(buildRow(context, R.drawable.msg_notifications, "Уведомления") {
+            context.startActivity(if (Build.VERSION.SDK_INT >= 26) Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:${context.packageName}")))
+        })
         column.addView(buildRow(context, R.drawable.msg_info, "О приложении") { stub(context) })
         column.addView(View(context).apply { setBackgroundColor(Theme.getColor(Theme.key_divider)) },
             LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 1, 0, 16, 8, 16, 8))
@@ -65,7 +72,12 @@ class SteamSettingsFragment : SteamBaseFragment() {
         AlertDialog.Builder(context)
             .setTitle("Выйти из аккаунта?")
             .setMessage("Понадобится войти заново.")
-            .setPositiveButton("Выйти") { _, _ -> scope.launch { service.logout() } }
+            .setPositiveButton("Выйти") { _, _ -> scope.launch {
+                context.stopService(Intent(context, SteamNotificationService::class.java))
+                (context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager).cancelAll()
+                service.logout()
+                (getParentActivity() as? SteamDebugActivity)?.onSteamLogout()
+            } }
             .setNegativeButton("Отмена", null)
             .show()
     }

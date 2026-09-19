@@ -11,6 +11,7 @@ import org.steamchat.domain.SteamGroupMessage
 import org.steamchat.domain.SteamIncomingVoiceCall
 import org.steamchat.domain.SteamMessage
 import org.steamchat.domain.SteamNameHistoryEntry
+import org.steamchat.domain.SteamNotificationEvent
 import org.steamchat.domain.SteamProfileStats
 import org.steamchat.domain.SteamUser
 
@@ -74,6 +75,11 @@ interface SteamService {
     suspend fun getMessageHistory(friendSteamId64: Long): List<SteamMessage>
 
     fun observeMessages(friendSteamId64: Long): Flow<SteamMessage>
+
+    fun observeMessageHistory(friendSteamId64: Long): StateFlow<List<SteamMessage>>
+
+    /** Live incoming messages across direct chats and group channels; excludes history and local echoes. */
+    fun observeNotificationEvents(): Flow<SteamNotificationEvent>
 
     suspend fun sendMessage(friendSteamId64: Long, text: String)
 
